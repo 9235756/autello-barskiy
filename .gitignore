@@ -1,0 +1,15 @@
+# Секреты
+.env
+registry/auth/htpasswd
+registry/auth/*.tmp
+
+# Генерируемые артефакты
+mock/
+reports/
+
+# Системное
+.DS_Store
+__pycache__/
+*.pyc
+.vscode/
+.idea/
