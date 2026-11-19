@@ -1,6 +1,7 @@
-﻿# Проверка стека Autello (часть 2) для Windows (PowerShell 5.1+ / 7+) → reports\check_report.md
+﻿# Проверка стека Autello (часть 3) для Windows (PowerShell 5.1+ / 7+) → reports\check_report.md
 #   powershell -ExecutionPolicy Bypass -File scripts\check.ps1
 # Логика та же, что в scripts/check.sh. Нужны Docker Desktop и curl.exe (есть в Windows 10+).
+# Все HTTP-запросы — через curl.exe -k: самоподписанный сертификат (make certs) PowerShell 5.1 иначе не примет.
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $Root = Split-Path -Parent $PSScriptRoot
@@ -11,32 +12,58 @@ $envs = @{}
 Get-Content .env -Encoding UTF8 | Where-Object { $_ -match '^\s*[^#\s][^=]*=' } | ForEach-Object {
     $k, $v = $_ -split '=', 2; $envs[$k.Trim()] = $v.Trim()
 }
-$HttpPort = if ($envs.HTTP_PORT) { $envs.HTTP_PORT } else { '80' }
-$Base = if ($HttpPort -eq '80') { 'http://localhost' } else { "http://localhost:$HttpPort" }
-$PortInt = if ($envs.BACKEND_INTERNAL_PORT) { $envs.BACKEND_INTERNAL_PORT } else { '8000' }
-$DocsEnabled = ($envs.DOCS_ENABLED -eq 'true')
-$Project = if ($envs.COMPOSE_PROJECT_NAME) { $envs.COMPOSE_PROJECT_NAME } else { $envs.PROJECT_NAME }
-$script:Rows = New-Object System.Collections.Generic.List[string]
-$script:Pass = 0; $script:Fail = 0
+function Env([string]$Name, [string]$Default) { if ($envs[$Name]) { $envs[$Name] } else { $Default } }
 
+$HttpPort  = Env 'HTTP_PORT' '80'
+$HttpsPort = Env 'HTTPS_PORT' '443'
+$HttpBase  = if ($HttpPort -eq '80') { 'http://localhost' } else { "http://localhost:$HttpPort" }
+$HttpsBase = if ($HttpsPort -eq '443') { 'https://localhost' } else { "https://localhost:$HttpsPort" }
+$Base = $HttpsBase
+$AdminUser = Env 'DEMO_ADMIN_USER' 'admin'
+$AdminPass = Env 'DEMO_ADMIN_PASSWORD' 'change_me_demo'
+$PgUser = Env 'POSTGRES_USER' 'autello'
+$PgDb   = Env 'POSTGRES_DB' 'autello'
+$NginxMode = ((docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' nginx 2>$null) | Where-Object { $_ -like 'NGINX_MODE=*' }) -replace 'NGINX_MODE=', ''
+if (-not $NginxMode) { $NginxMode = 'неизвестен' }
+
+$script:Rows = New-Object System.Collections.Generic.List[string]
+$script:Pass = 0; $script:Fail = 0; $script:Skip = 0; $script:Section = ''
+$TmpBody = Join-Path ([System.IO.Path]::GetTempPath()) 'autello_check_body.json'
+
+function Section([string]$Name) { $script:Section = $Name; Write-Host "`n=== $Name ===" }
 function Add-Result([bool]$Ok, [string]$Name, [string]$Detail) {
     $Detail = ($Detail -replace '\|', '/' -replace "`r?`n", ' ')
+    if ($Detail.Length -gt 200) { $Detail = $Detail.Substring(0, 200) + '…' }
     if ($Ok) { $script:Pass++; $icon = '✅'; $color = 'Green' } else { $script:Fail++; $icon = '❌'; $color = 'Red' }
-    $script:Rows.Add("| $icon | $Name | $Detail |")
+    $script:Rows.Add("| $icon | $($script:Section) | $Name | $Detail |")
     Write-Host "$icon $Name — $Detail" -ForegroundColor $color
 }
+function Add-Skip([string]$Name, [string]$Detail) {
+    $script:Skip++; $script:Rows.Add("| ⏭ | $($script:Section) | $Name | $Detail |"); Write-Host "⏭ $Name — $Detail" -ForegroundColor Yellow
+}
+# HTTP-код ответа
 function Get-Code([string]$Url, [string[]]$Extra = @()) {
-    $a = @('-s', '-o', 'NUL', '-w', '%{http_code}', '--max-time', '10') + $Extra
+    $a = @('-sk', '-o', 'NUL', '-w', '%{http_code}', '--max-time', '10') + $Extra
     (& curl.exe @a $Url) 2>$null
 }
-function Get-Body([string]$Url) { (& curl.exe -s --max-time 10 $Url) -join "`n" }
-function Find-Asset([string]$Html, [string]$Attr, [string]$Ext) {
-    $m = [regex]::Match($Html, "$Attr=`"?(/assets/[^`" >]+\.$Ext)")
-    if ($m.Success) { $m.Groups[1].Value } else { '' }
+# Тело ответа как объект (JSON) или $null. JSON-тело передаём файлом — так кавычки не ломаются в PowerShell 5.1
+function Invoke-Api([string]$Method, [string]$Path, $Body = $null, [string]$Token = '', [hashtable]$Form = $null) {
+    $a = @('-sk', '--max-time', '15', '-X', $Method)
+    if ($Token) { $a += @('-H', "Authorization: Bearer $Token") }
+    if ($Form) { foreach ($k in $Form.Keys) { $a += @('--data-urlencode', "$k=$($Form[$k])") } }
+    elseif ($null -ne $Body) {
+        [System.IO.File]::WriteAllText($TmpBody, ($Body | ConvertTo-Json -Compress -Depth 5), (New-Object System.Text.UTF8Encoding $false))
+        $a += @('-H', 'Content-Type: application/json', '--data-binary', "@$TmpBody")
+    }
+    $raw = (& curl.exe @a "$Base$Path") -join "`n"
+    try { $raw | ConvertFrom-Json } catch { $null }
 }
+function Psql([string]$Sql) { ((docker compose exec -T postgres psql -U $PgUser -d $PgDb -tAc $Sql) -join '').Trim() }
+Write-Host "Режим nginx: $NginxMode · API: $Base"
 
-Write-Host '=== 1. Контейнеры ==='
-$composePs = (docker compose ps --format 'table {{.Name}}\t{{.Service}}\t{{.Status}}\t{{.Ports}}') -join "`n"
+# =====================================================================
+Section 'Контейнеры'
+$composePs = (docker compose --profile admin-tools ps --format 'table {{.Name}}\t{{.Service}}\t{{.Status}}\t{{.Ports}}') -join "`n"
 $dockerPs  = (docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}') -join "`n"
 Write-Host $composePs
 foreach ($svc in 'backend', 'postgres', 'nginx') {
@@ -45,123 +72,103 @@ foreach ($svc in 'backend', 'postgres', 'nginx') {
     $st = docker inspect -f '{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}' $cid
     Add-Result ($st -eq 'running/healthy' -or $st -eq 'running') "${svc}: running/healthy" $st
 }
-$restarting = (docker inspect -f '{{if .State.Restarting}}{{.Name}} {{end}}' (docker compose ps -aq)) -join '' -replace '/', ''
-Add-Result ([string]::IsNullOrWhiteSpace($restarting)) 'Ни один контейнер не в Restarting' $(if ($restarting) { $restarting } else { 'ни одного' })
 
-Write-Host '=== 2. backend видит БД ==='
-$py = "from sqlalchemy import text`nfrom app.core.db import engine`nwith engine.connect() as c: print('db=' + c.execute(text('select current_database()')).scalar())"
-$dbPing = (docker compose exec -T backend python -c $py 2>&1 | Select-Object -Last 1) -as [string]
-Add-Result ($dbPing -like 'db=*') 'backend → postgres (SQLAlchemy из контейнера)' $dbPing
-$health = Get-Body "$Base/api/health"
-Add-Result ($health -match '"status":"ok"' -and $health -match '"db":"ok"') 'GET /api/health через nginx' $health
+# =====================================================================
+Section 'Авторизация (п.1)'
+$chk = Invoke-Api GET '/api/auth/check'
+Add-Result ($chk.has_admins -eq $true) 'GET /api/auth/check' "has_admins=$($chk.has_admins)"
+$login = Invoke-Api POST '/api/auth/login' -Form @{ username = $AdminUser; password = $AdminPass }
+$Token = $login.access_token
+Add-Result ([bool]$Token) 'POST /api/auth/login (form-data) → JWT' $(if ($Token) { "длина $($Token.Length)" } else { 'нет токена' })
+$authH = @('-H', "Authorization: Bearer $Token")
+$c = Get-Code "$Base/api/auth/me" $authH;                                   Add-Result ($c -eq '200') 'GET /api/auth/me с токеном' "HTTP $c"
+$c = Get-Code "$Base/api/admin-settings/1" @('-X', 'DELETE');               Add-Result ($c -eq '401') 'DELETE /api/admin-settings/1 без токена' "HTTP $c (ожидается 401)"
+$c = Get-Code "$Base/api/applications/ranked";                              Add-Result ($c -eq '401') 'GET /api/applications/ranked без токена' "HTTP $c (ожидается 401)"
 
-Write-Host '=== 3. Услуги ==='
-$services = @()
-try { $services = @(Invoke-RestMethod "$Base/api/admin-settings" -TimeoutSec 10) } catch {}
-$names = ($services | ForEach-Object { "$($_.services) ($($_.budget_range))" }) -join ', '
-Add-Result ($services.Count -ge 3) 'GET /api/admin-settings → ≥3 услуги' "$($services.Count) шт.: $names"
-$c = Get-Code "$Base/api/admin-settings/"
-Add-Result ($c -eq '200') 'GET /api/admin-settings/ (со слэшем) без 307' "HTTP $c"
+# =====================================================================
+Section 'Услуги (п.2)'
+$services = @(Invoke-Api GET '/api/admin-settings?only_active=true')
+Add-Result ($services.Count -ge 5) 'GET /api/admin-settings — массив, ≥5 активных услуг' "$($services.Count) шт.: $(($services | ForEach-Object { $_.services }) -join ', ')"
+$name = "check.ps1 услуга $(Get-Date -Format HHmmss)"
+$created = Invoke-Api POST '/api/admin-settings' @{ services = $name; budget_min = 1000; budget_max = 5000 } $Token
+$sid = $created.id
+$put = Invoke-Api PUT "/api/admin-settings/$sid" @{ budget_max = 7000 } $Token
+$del = Get-Code "$Base/api/admin-settings/$sid" (@('-X', 'DELETE') + $authH)
+$gone = -not (@(Invoke-Api GET '/api/admin-settings?only_active=true') | Where-Object { $_.id -eq $sid })
+Add-Result ($sid -and $put.budget_max -eq 7000 -and $del -eq '204' -and $gone) 'CRUD-цикл услуги с токеном' "POST → id $sid, PUT → budget_max $($put.budget_max), DELETE → $del, исчезла: $gone"
 
-Write-Host '=== 4. Статика ==='
-$index = Get-Body "$Base/"
-Add-Result ((Get-Code "$Base/") -eq '200') 'GET / (index.html)' 'HTTP 200'
-$css = Find-Asset $index 'href' 'css'; $js = Find-Asset $index 'src' 'js'
-$cssType = ''
-try { $r = Invoke-WebRequest "$Base$css" -UseBasicParsing -TimeoutSec 10; $cssCode = [string]$r.StatusCode; $cssType = $r.Headers['Content-Type'] } catch { $cssCode = 'ошибка' }
-Add-Result ($css -and $cssCode -eq '200' -and $cssType -match 'text/css') "CSS $css" "HTTP $cssCode, Content-Type: $cssType"
-$c = Get-Code "$Base$js"; Add-Result ($js -and $c -eq '200') "JS $js" "HTTP $c"
-$adminCss = Find-Asset (Get-Body "$Base/admin/") 'href' 'css'
-$c = Get-Code "$Base$adminCss"; Add-Result ($adminCss -and $c -eq '200') '/admin подключает CSS по абсолютному пути' "$adminCss → HTTP $c"
-$c = Get-Code "$Base/assets/nope.css"; Add-Result ($c -eq '404') 'Несуществующий CSS → 404, а не index.html' "HTTP $c"
+# =====================================================================
+Section 'Метрики (п.3)'
+if (Test-Path reports\visitor_activity.json) {
+    $va = Get-Content reports\visitor_activity.json -Raw -Encoding UTF8 | ConvertFrom-Json
+    $r = $va.metrics_rows
+    Add-Result ($r.during_12s -gt $r.before -and $r.after -ge $r.before + 3) 'count(*) behavior_metrics растёт во время visitor_activity (e2e)' "до: $($r.before), через 12 с: $($r.during_12s), после: $($r.after); долгий визит $($va.visits[0].time_on_page) с"
+} else { Add-Result $false 'count(*) behavior_metrics растёт во время visitor_activity (e2e)' 'нет reports\visitor_activity.json — запустите e2e' }
+$n0 = [int](Psql 'SELECT count(*) FROM behavior_metrics')
+$sess = "check-ps-$(Get-Date -Format HHmmss)"
+foreach ($t in 1..3) {
+    $null = Invoke-Api POST '/api/behavior-metrics' @{ application_id = 0; time_on_page = $t; buttons_clicked = '{"submit":1}'; cursor_positions = '[{"x":0.4,"y":0.3}]'; return_frequency = 0; session_id = $sess }
+    Start-Sleep -Seconds 1
+}
+$n1 = [int](Psql 'SELECT count(*) FROM behavior_metrics')
+Add-Result ($n1 - $n0 -eq 1) '3 снимка одного визита → 1 строка (upsert)' "строк было $n0, стало $n1"
+$stats = Invoke-Api GET '/api/behavior-metrics/stats' $null $Token
+$hasPeriods = $stats.periods.day -and $stats.periods.week -and $stats.periods.month
+Add-Result ($hasPeriods -and $stats.heatmap.Count -gt 0) 'GET /api/behavior-metrics/stats: 3 периода + heatmap' "месяц: ср. $($stats.periods.month.avg_sec) с, макс. $($stats.periods.month.max_sec) с, сессий $($stats.periods.month.sessions); heatmap $($stats.heatmap.Count) ячеек"
 
-Write-Host '=== 5. POST без 307/405 ==='
-$svcId = if ($services.Count) { $services[0].id } else { 1 }
-foreach ($path in '/api/applications', '/api/applications/') {
-    $body = @{ application = @{ last_name = 'Проверкин'; first_name = 'PowerShell'; phone = '+7 900 000-00-00'; service_id = $svcId; role = 'сотрудник'; budget = '50000'; comment = 'check.ps1' }; metrics = @{ time_on_page_sec = 5; utm = @{ utm_source = 'check' } } } | ConvertTo-Json -Depth 5
-    $tmp = New-TemporaryFile
-    [System.IO.File]::WriteAllText($tmp, $body, (New-Object System.Text.UTF8Encoding $false))
-    $c = Get-Code "$Base$path" @('-X', 'POST', '-H', 'Content-Type: application/json', '--data-binary', "@$tmp")
-    Remove-Item $tmp
-    Add-Result ($c -eq '201') "POST $path" "HTTP $c (ожидается 201, не 307/405)"
+# =====================================================================
+Section 'Приоритизация (п.4)'
+$ranked = @(Invoke-Api GET '/api/applications/ranked' $null $Token)
+$test10 = @($ranked | Where-Object { $_.comment -like '`[тест-SQL`]*' })
+$dist = '{0}/{1}/{2}' -f @($test10 | Where-Object { $_.scoring.temperature -eq 'hot' }).Count, @($test10 | Where-Object { $_.scoring.temperature -eq 'warm' }).Count, @($test10 | Where-Object { $_.scoring.temperature -eq 'cold' }).Count
+Add-Result ($dist -eq '4/3/3') '/ranked: 10 тестовых заявок → 🔥/🌤/❄️' "$dist (ожидается 4/3/3)"
+$sorted = $true; for ($i = 0; $i -lt $ranked.Count - 1; $i++) { if ($ranked[$i].scoring.score -lt $ranked[$i + 1].scoring.score) { $sorted = $false } }
+Add-Result $sorted '/ranked отсортирован по score' "первые: $(($ranked | Select-Object -First 4 | ForEach-Object { "$($_.last_name) $($_.scoring.score)" }) -join ', ')"
+$pytest = (docker compose run --rm --no-deps -T backend python -m pytest -q -p no:cacheprovider tests 2>&1 | Select-Object -Last 1) -as [string]
+Add-Result ($pytest -match '\d+ passed' -and $pytest -notmatch 'failed|error') 'pytest tests/test_lead_scoring.py' $pytest
+
+# =====================================================================
+Section 'Безопасность (п.5)'
+if ($NginxMode -eq 'secure') {
+    $c = Get-Code "$HttpsBase/";                                   Add-Result ($c -eq '200') "curl -k $HttpsBase" "HTTP $c"
+    $redir = (& curl.exe -s -o NUL -w '%{http_code} %{redirect_url}' --max-time 10 "$HttpBase/admin") 2>$null
+    Add-Result ($redir -like '301 https://*') "curl $HttpBase → 301 на https" $redir
+    foreach ($p in @((Env 'STUB_BACKEND_PORT' '8000'), (Env 'STUB_POSTGRES_PORT' '5432'))) {
+        $c = (& curl.exe -s -o NUL -w '%{http_code}' --max-time 5 "http://localhost:$p/") 2>$null
+        Add-Result ($c -eq '403') "curl http://localhost:$p → 403" "HTTP $c (заглушка nginx)"
+    }
+    foreach ($p in @((Env 'PGADMIN_PORT' '5050'), (Env 'REGISTRY_PORT' '5000'), (Env 'REGISTRY_UI_PORT' '8080'))) {
+        & curl.exe -s -o NUL --max-time 5 "http://localhost:$p/" 2>$null; $rc = $LASTEXITCODE
+        Add-Result ($rc -eq 7) "localhost:$p — соединение отклонено" "curl exit $rc"
+    }
+    $published = @(docker compose ps -q | ForEach-Object { if (docker port $_ 2>$null) { (docker inspect -f '{{.Name}}' $_).TrimStart('/') } }) | Sort-Object -Unique
+    Add-Result (($published -join ',') -eq 'nginx') 'docker ps: порты опубликованы только у nginx' "с портами: $($published -join ', ')"
+    $c1 = Get-Code "$HttpsBase/docs"; $c2 = Get-Code "$HttpsBase/openapi.json"
+    Add-Result ($c1 -eq '404' -and $c2 -eq '404') '/docs и /openapi.json закрыты' "HTTP $c1 / $c2"
+} else {
+    foreach ($item in 'https://localhost = 200', 'http://localhost = 301', ':8000 и :5432 = 403', ':5050/:5000/:8080 закрыты', 'порты только у nginx', '/docs = 404') {
+        Add-Skip $item "режим $NginxMode — запустите secure-режим и проверку ещё раз"
+    }
 }
 
-Write-Host '=== 6. Изоляция backend ==='
-$bPorts = (docker port backend 2>$null) -join ' '
-Add-Result ([string]::IsNullOrWhiteSpace($bPorts)) 'Контейнер backend не публикует порты' $(if ($bPorts) { $bPorts } else { 'docker port backend: пусто' })
-$bNets = docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' backend
-Add-Result (-not ($bNets -match '_public')) 'backend только в сети internal' "сети: $bNets"
-$owner = (docker ps --format '{{.Names}} {{.Ports}}' | Where-Object { $_ -match "(0\.0\.0\.0|::|127\.0\.0\.1):$PortInt->" } | ForEach-Object { ($_ -split ' ')[0] }) -join ' '
-$note = if ($owner -and $owner -notmatch '^backend$') { "localhost:$PortInt занят сторонним контейнером ($owner) — к стеку не относится" } else { "backend стека порт $PortInt не публикует" }
-Add-Result ([string]::IsNullOrWhiteSpace($bPorts)) 'Backend стека недоступен с хоста напрямую' $note
-$net = (docker run --rm --network "${Project}_public" alpine:3 sh -c "nc -z -w 3 backend $PortInt && echo OPEN || echo CLOSED" 2>$null) -join ''
-Add-Result ($net -eq 'CLOSED') 'Из сети public backend недоступен' "nc backend:$PortInt → $net"
+Section 'Логи (п.6)'
+$logs = (docker logs --tail 50 backend 2>&1) -join "`n"
+Add-Result ($logs -notmatch 'Traceback') 'Последние 50 строк docker logs backend без Traceback' 'проверено'
 
-Write-Host '=== 7. Swagger ==='
-$cd = Get-Code "$Base/docs"; $co = Get-Code "$Base/openapi.json"
-if ($DocsEnabled) { Add-Result ($cd -eq '200' -and $co -eq '200') 'DOCS_ENABLED=true: /docs и /openapi.json' "HTTP $cd / $co" }
-else { Add-Result ($cd -eq '404' -and $co -eq '404') 'DOCS_ENABLED=false: /docs закрыт' "HTTP $cd / $co (ожидается 404)" }
-
-Write-Host '=== 8. Данные в БД ==='
-$psql = @('compose', 'exec', '-T', 'postgres', 'psql', '-U', $envs.POSTGRES_USER, '-d', $envs.POSTGRES_DB)
-$nApp = ((& docker @psql -tAc 'SELECT count(*) FROM applications') -join '').Trim()
-$nMet = ((& docker @psql -tAc 'SELECT count(*) FROM behavior_metrics') -join '').Trim()
-Add-Result ($nApp -match '^\d+$' -and [int]$nApp -gt 0) 'SELECT count(*) FROM applications' $nApp
-Add-Result ($nApp -eq $nMet) 'applications = behavior_metrics (связь 1:1)' "$nApp = $nMet"
-$last3 = (& docker @psql -c "SELECT a.id, a.last_name||' '||a.first_name AS fio, s.services AS service, a.budget, a.role, m.time_on_page_sec AS sec, m.utm->>'utm_source' AS utm FROM applications a LEFT JOIN admin_settings s ON s.id=a.service_id LEFT JOIN behavior_metrics m ON m.application_id=a.id ORDER BY a.id DESC LIMIT 3") -join "`n"
-Write-Host $last3
-
-Write-Host '=== 9. Логи backend ==='
-$logs = (docker logs --tail 20 backend 2>&1) -join "`n"
-Add-Result (-not ($logs -match 'Traceback')) 'Последние 20 строк docker logs backend без Traceback' 'Traceback не найден'
-
+# ---------- Отчёт ----------
 $total = $script:Pass + $script:Fail
 $summary = if ($script:Fail -eq 0) { "✅ Все проверки пройдены: $($script:Pass) из $total" } else { "❌ Провалено проверок: $($script:Fail) из $total" }
+if ($script:Skip -gt 0) { $summary += " (пропущено в режиме ${NginxMode}: $($script:Skip))" }
 New-Item -ItemType Directory -Force reports | Out-Null
-$fence = '```'
-@"
-# Отчёт проверки стека Autello — часть 2 (PowerShell)
-
-- Дата: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-- DOCS_ENABLED: $($envs.DOCS_ENABLED)
-
-## Итог
-
-**$summary**
-
-## Проверки
-
-| | Проверка | Результат |
-|---|---|---|
-$($script:Rows -join "`n")
-
-## docker compose ps
-
-$fence
-$composePs
-$fence
-
-## docker ps
-
-$fence
-$dockerPs
-$fence
-
-## Последние 3 заявки (всего: $nApp)
-
-$fence
-$last3
-$fence
-
-## Адреса
-
-- Сайт: $Base/
-- Админка: $Base/admin
-- Swagger: $Base/docs
-- pgAdmin: http://localhost:$($envs.PGADMIN_PORT)
-"@ | Set-Content -Encoding UTF8 reports\check_report.md
-
-Write-Host ''
-Write-Host $summary
+$report = @(
+    '# Отчёт проверки стека Autello — часть 3 (PowerShell)', '',
+    "- Дата: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
+    "- Режим nginx: **$NginxMode**", "- Адрес API в проверках: $Base", '',
+    '## Итог', '', "**$summary**", '',
+    '## Проверки', '', '| | Раздел | Проверка | Результат |', '|---|---|---|---|'
+) + $script:Rows + @('', '## docker compose ps', '', '```', $composePs, '```', '', '## docker ps', '', '```', $dockerPs, '```', '', '## docker logs --tail 50 backend', '', '```', $logs, '```')
+[System.IO.File]::WriteAllLines((Join-Path $Root 'reports\check_report.md'), $report, (New-Object System.Text.UTF8Encoding $false))
+Remove-Item $TmpBody -ErrorAction SilentlyContinue
+Write-Host "`n$summary"
 Write-Host 'Отчёт: reports\check_report.md'
-if ($script:Fail -ne 0) { exit 1 }
+if ($script:Fail -gt 0) { exit 1 }

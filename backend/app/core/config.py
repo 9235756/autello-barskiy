@@ -21,8 +21,20 @@ class Settings(BaseSettings):
 
     # Через запятую: http://localhost,https://autello.ru
     cors_origins: str = "http://localhost"
-    # Заготовка под авторизацию /admin (следующий урок)
+    # Устарело (часть 2): авторизация теперь по JWT, см. ниже
     admin_token: str = "change_me"
+
+    # === Часть 3: авторизация админки (JWT, HS256) ===
+    # Сгенерировать: openssl rand -hex 32 (make secret пишет его в .env)
+    secret_key: str = "replace_with_openssl_rand_hex_32"
+    access_token_expire_minutes: int = 120
+    jwt_algorithm: str = "HS256"
+
+    # rules — прозрачная балльная система; llm_mock — та же оценка + «ИИ-резюме», сгенерированное локально
+    lead_scoring_mode: str = "rules"
+
+    # Каталог с SQL-миграциями (монтируется из ./sql в docker-compose)
+    sql_dir: str = "/srv/sql"
 
     @property
     def database_url(self) -> URL:

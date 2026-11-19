@@ -1,241 +1,326 @@
 # Autello Barskiy — Кейс 3: сайт для обработки заказов
 
 - **Часть 1** — инфраструктура: Nginx, PostgreSQL, pgAdmin, локальный Docker Registry с веб-интерфейсом, Watchtower.
-- **Часть 2** (этот README) — backend на FastAPI, фронтенд в «элитном стиле», собранный webpack'ом, и их связка через Nginx.
+- **Часть 2** — backend на FastAPI, фронтенд на webpack, связка через Nginx.
+- **Часть 3** (этот README) — вход в админку по JWT, CRUD услуг в таблице, поведенческие метрики с heatmap, приоритизация лидов, HTTPS и защищённый режим.
 
-Весь стек поднимается одной командой (`make all`). Он одинаково работает локально в Docker (`MOCK_MODE=true`) и на VPS с Ubuntu 22.04.
+Стек одинаково работает локально в Docker (`MOCK_MODE=true`) и без изменений на VPS с Ubuntu 22.04.
 
-## Архитектура
+## Два режима запуска
 
-```
-                         браузер / Playwright / scripts/*.py
-                                      │  :80
-   ┌──────────────────────── сеть public ─────────────────────────────┐
-   │  nginx ── /            → frontend/dist (index.html)              │
-   │        ── /admin       → frontend/dist/admin/index.html          │
-   │        ── /assets/*    → CSS/JS с contenthash, кеш на год        │
-   │        ── /api/*       → backend:8000  (путь не переписывается)  │
-   │        ── /docs        → backend:8000  только при DOCS_ENABLED   │
-   │  pgadmin :5050   registry :5001   registry-ui :8080   watchtower │
-   └───────────┬───────────────────────────────┬──────────────────────┘
-               │ nginx и pgadmin — в обеих сетях
-   ┌───────────┴──────── сеть internal (internal: true) ──────────────┐
-   │  backend :8000 (без ports)  ──SQLAlchemy/psycopg──▶  postgres    │
-   └──────────────────────────────────────────────────────────────────┘
-```
+Пункты 1–4 задания требуют Swagger на `:8000` и pgAdmin, а пункт 5 требует их закрыть. Поэтому режимов два:
 
-- **Backend** находится только в сети `internal` и не публикует порты. Снаружи до него можно добраться только через nginx `/api/`.
-- **Postgres** видят только `backend` и `pgadmin`.
-- **Swagger** открыт временно, для тестирования. При `DOCS_ENABLED=false` nginx отвечает 404 на `/docs` и `/openapi.json`.
+| | `make dev` — разработка | `make secure` — защищённый (пункт 5) |
+|---|---|---|
+| Файлы compose | `docker-compose.yml` + `docker-compose.dev.yml`, профиль `admin-tools` | только `docker-compose.yml` (это и есть `docker compose up --build -d`) |
+| Сайт | http://localhost и https://localhost | https://localhost; http → **301** на https |
+| Swagger | http://localhost:8000/docs (backend на `127.0.0.1:8000`) и https://localhost/docs | `/docs`, `/openapi.json` → **404** |
+| `:8000`, `:5432` | backend на `127.0.0.1:8000`, PostgreSQL не опубликован | nginx отвечает **403** на HTTP-запрос |
+| pgAdmin `:5050`, registry `:5000`, UI `:8080` | работают | не запускаются: соединение отклонено |
+| Порты наружу | nginx, backend (только loopback), pgAdmin, registry | **только nginx** |
 
-## Структура (новое в части 2)
+> **Про «код 403» на 8000 и 5432.** Закрытый порт обычно просто отклоняет соединение (`Connection refused`), а не отвечает кодом 403. Чтобы требование выполнилось буквально, в защищённом режиме эти порты слушает **nginx** и на любой HTTP-запрос отвечает `403 Forbidden` (`nginx/templates/modes/secure.conf.template`). Настоящие backend и PostgreSQL наружу не опубликованы вообще: они сидят во внутренней docker-сети `internal` без выхода наружу. До них такие запросы не доходят.
 
-```
-backend/
-├── Dockerfile               python:3.12-slim, uvicorn 0.0.0.0:8000, HEALTHCHECK → /api/health
-├── requirements.txt         фиксированные версии
-└── app/
-    ├── main.py              FastAPI(redirect_slashes=False), роутеры с prefix="/api", create_all
-    ├── core/config.py       настройки из env, DATABASE_URL собирается из POSTGRES_*
-    ├── core/db.py           engine, SessionLocal, Base, get_db
-    ├── models/              модель + SQL CREATE TABLE в docstring + класс CRUD в каждом файле
-    │   ├── admin_settings.py     услуги и диапазоны цен
-    │   ├── application.py        заявка (FK → admin_settings)
-    │   └── behavior_metrics.py   метрики, 1:1 (application_id = PK и FK)
-    ├── schemas/             Pydantic In/Out, from_attributes=True
-    └── routers/             health, admin_settings, applications
-frontend/
-├── package.json, webpack.config.js    webpack 5 + mini-css-extract-plugin, publicPath "/"
-└── src/
-    ├── index.html, index.js           клиентская страница с формой
-    ├── admin.html, admin.js           /admin: CRUD услуг + последние заявки
-    ├── tracker.js                     поведенческие метрики
-    ├── api.js                         fetch с таймаутом, только относительные /api/...
-    └── styles/                        base.css, main.css, admin.css
-nginx/templates/                       шаблоны → /etc/nginx/conf.d через envsubst
-├── default.conf.template
-├── docs/docs_true.conf.template       /docs и /openapi.json → backend
-├── docs/docs_false.conf.template      /docs и /openapi.json → 404
-└── snippets/                          proxy_params, security_headers
-scripts/
-├── seed_services.py       3 услуги через API (запасной путь, основной — Swagger)
-├── simulate_leads.py      N клиентов с метриками → POST /api/applications
-├── mock_gpt.py            заглушка GPT-анализа лида (для следующей части)
-├── e2e/form.spec.ts       Playwright: форма → «Заявка отправлена!» + скриншоты
-└── check.sh / check.ps1   9 групп проверок → reports/check_report.md
-```
+> **Если порты 8000 или 5432 на вашей машине уже заняты** (другой контейнер, локальный PostgreSQL), задайте в `.env` другие: `BACKEND_DEV_PORT`, `STUB_BACKEND_PORT`, `STUB_POSTGRES_PORT`. На VPS оставьте 8000 и 5432.
 
-## Быстрый старт (эмуляция)
+## Быстрый старт: всё автоматически
 
-Нужны Docker Desktop или Docker Engine с плагином `docker compose`, а также `make` и `python3`. Node.js не обязателен: без него фронт соберётся в контейнере.
+Нужны Docker Desktop или Docker Engine с плагином `docker compose`, а также `make`, `python3` и `openssl`. Node.js не обязателен: без него фронт соберётся в контейнере.
 
 ```bash
 make all
 ```
 
-Цепочка выполняет `init → ensure-user → build-front → up → seed → leads → e2e → check`. В конце должна появиться строка **«✅ Все проверки пройдены»**.
+Цепочка: `secret → certs → dev → build-front → seed → test-sql → backfill → e2e → pytest → secure → check`. Займёт около 5 минут, из них 2,5 минуты — «живой» визит Playwright. В конце должна появиться строка **«✅ Все проверки пройдены»**, а в `reports/check_report.md` — таблица с ✅ по каждому пункту.
 
 | Цель | Что делает |
 |---|---|
-| `make build-front` | `npm ci && npm run build` в `frontend/`, а если npm нет — `docker compose --profile tools run --rm frontend-build` |
-| `make up` | `docker compose up -d --build` и ожидание, пока backend и nginx станут healthy |
-| `make seed` | `python scripts/seed_services.py` — 3 услуги (идемпотентно) |
-| `make leads` | `python scripts/simulate_leads.py` — 10 заявок (`-n 50` — больше) |
-| `make e2e` | `docker compose --profile tools run --rm e2e` — браузерный тест и скриншоты |
-| `make check` | `bash scripts/check.sh` → `reports/check_report.md` |
+| `make secret` | создаёт `.env` (если нет), дописывает новые переменные из `example.env`, генерирует `SECRET_KEY` (`openssl rand -hex 32`) |
+| `make certs` | самоподписанный сертификат → `nginx/certs/` (CN=localhost, SAN с `VPS_DOMAIN`/`VPS_HOST`) |
+| `make dev` | режим разработки (см. таблицу выше) |
+| `make secure` | защищённый режим: останавливает pgAdmin/registry, `docker compose up --build -d` |
+| `make build-front` | `npm ci && npm run build` в `frontend/`, а без npm — в контейнере `node:20-alpine` |
+| `make seed` | 5 услуг через API с логином демо-админа (запасной путь, основной — таблица в админке) |
+| `make test-sql` | `psql < sql/test_applications.sql` — 10 тестовых заявок (4 🔥 / 3 🌤 / 3 ❄️) |
+| `make backfill` | ~300 исторических визитов за 30 дней в `behavior_metrics` |
+| `make e2e` | Playwright в контейнере: 6 сценариев и скриншоты в `reports/screens/`. Короче: `make e2e VISIT_SECONDS=30`, один файл: `make e2e E2E_ARGS=ranking` |
+| `make pytest` | `pytest` балльной системы внутри контейнера backend |
+| `make check` | `scripts/check.sh` → `reports/check_report.md` |
 | `make logs` | `docker logs -f backend` (`make logs-nginx` — то же для nginx) |
-| `make gpt` | мок-анализ трёх последних заявок |
-| `make push` | собрать backend и отправить в локальный registry |
 
 ### Windows (PowerShell)
 
 ```powershell
-if (-not (Test-Path .env)) { Copy-Item example.env .env }                          # init
-# build-front: локальный npm или контейнер
-if (Get-Command npm -ErrorAction SilentlyContinue) { Push-Location frontend; npm ci; npm run build; Pop-Location }
-else { docker compose --profile tools run --rm frontend-build }
-docker compose up -d --build                                                        # up
-python scripts\seed_services.py                                                     # seed
-python scripts\simulate_leads.py                                                    # leads
-docker compose --profile tools run --rm e2e                                         # e2e
-powershell -ExecutionPolicy Bypass -File scripts\check.ps1                          # check
-docker logs -f backend                                                              # logs
+# secret: .env и SECRET_KEY
+if (-not (Test-Path .env)) { Copy-Item example.env .env }
+$key = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+(Get-Content .env) -replace '^SECRET_KEY=.*', "SECRET_KEY=$key" | Set-Content -Encoding utf8 .env
+# certs: самоподписанный сертификат (openssl в контейнере)
+New-Item -ItemType Directory -Force nginx\certs | Out-Null
+docker run --rm -v "${PWD}\nginx\certs:/certs" alpine:3 sh -c "apk add -q openssl && openssl req -x509 -nodes -newkey rsa:2048 -days 825 -keyout /certs/privkey.pem -out /certs/fullchain.pem -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1"
+# build-front
+if (Get-Command npm -ErrorAction SilentlyContinue) { Push-Location frontend; npm ci; npm run build; Pop-Location } else { docker compose --profile tools run --rm frontend-build }
+# dev
+$env:COMPOSE_PROFILES = 'admin-tools'; docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build; Remove-Item Env:COMPOSE_PROFILES
+python scripts\seed_services.py                                                            # seed
+Get-Content sql\test_applications.sql -Raw | docker compose exec -T postgres psql -U autello -d autello   # test-sql
+python scripts\backfill_metrics.py                                                         # backfill
+docker compose exec -T postgres psql -U autello -d autello -c "DELETE FROM admins"         # (только для e2e на «чистой» БД)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --profile tools run --rm e2e   # e2e
+docker compose run --rm --no-deps -T backend python -m pytest -q -p no:cacheprovider tests  # pytest
+# secure
+docker compose --profile admin-tools stop pgadmin registry registry-ui; docker compose --profile admin-tools rm -f pgadmin registry registry-ui
+docker compose up --build -d
+powershell -ExecutionPolicy Bypass -File scripts\check.ps1                                 # check
+docker logs -f backend                                                                     # logs
 ```
 
-Если файла `registry\auth\htpasswd` нет (свежий клон), создайте пользователя реестра так, как описано в разделе части 1 ниже.
+## Работа в двух терминалах
 
-## Что открыть
-
-| Адрес | Что там |
+| Терминал 1 — корень проекта | Терминал 2 — `frontend/` |
 |---|---|
-| http://localhost/ | Клиентская страница: выбор услуги, ползунок бюджета, форма |
-| http://localhost/admin | Админка: CRUD услуг и последние заявки (авторизация будет в следующем уроке) |
-| http://localhost/docs | Swagger, если `DOCS_ENABLED=true` |
-| http://localhost:5050 | pgAdmin: `PGADMIN_DEFAULT_EMAIL` / `PGADMIN_DEFAULT_PASSWORD` |
-| http://localhost:8080 | Registry UI |
+| `make dev` (или `docker compose up --build -d`) | `npm run build` после каждой правки в `src/` (`npm run dev` пересобирает сам) |
+| `docker logs -f backend` — запросы, ошибки, Traceback | — |
+| `docker compose up --build -d backend` — после правки Python | — |
 
-В pgAdmin: **Servers → Autello → Autello PostgreSQL (internal)**, пароль — `POSTGRES_PASSWORD`. Дальше **autello → Schemas → public → Tables → applications**, правый клик → **View/Edit Data → All Rows**.
+Nginx раздаёт `frontend/dist` напрямую через volume, поэтому после `npm run build` достаточно обновить страницу с очисткой кеша: **Ctrl+F5** (на macOS — **Cmd+Shift+R**).
 
-## Создание услуг вручную через Swagger (основной способ по заданию)
+---
 
-1. Откройте http://localhost/docs.
-2. Раскройте **POST /api/admin-settings** и нажмите **Try it out**.
-3. Вставьте JSON и нажмите **Execute**. Ожидаемый ответ — **201** с `id`, `created_at` и `updated_at`:
-   ```json
-   { "services": "Полировка кузова", "budget_range": "15к–60к", "budget_min": 15000, "budget_max": 60000 }
-   ```
-4. Повторите шаг для двух других услуг:
-   ```json
-   { "services": "Химчистка салона", "budget_range": "10к–40к", "budget_min": 10000, "budget_max": 40000 }
-   { "services": "Керамическое покрытие", "budget_range": "50к–250к", "budget_min": 50000, "budget_max": 250000 }
-   ```
-   `budget_range` можно не передавать: он соберётся из `budget_min` и `budget_max`. Если услуга с таким названием уже есть, придёт ответ 409.
-5. В **GET /api/admin-settings** нажмите **Try it out → Execute**. Ответ — список всех услуг.
+## Пункт 1. Админка: логин, пароль и JWT
 
-Запасной вариант — `make seed`: скрипт создаёт те же три услуги и пропускает уже существующие.
+**Как устроено**
 
-## API
+- Таблица `admins` (`backend/app/models/admin.py`): `id`, `username` (unique), `hashed_password`, `created_at`. SQL — в docstring модели и в `sql/schema_part3.sql`.
+- Пароли хешируются библиотекой **bcrypt напрямую**: passlib ломается на bcrypt 4.1+. JWT выдаёт **PyJWT** (HS256), ключ берётся из `SECRET_KEY`, срок — из `ACCESS_TOKEN_EXPIRE_MINUTES`.
+- `GET /api/auth/check` → `{"has_admins": false}`. Пока админов нет, на странице входа видна кнопка **«Зарегистрироваться»**. После первой регистрации она исчезает, а повторный `POST /api/auth/register` получает **403**.
+- `POST /api/auth/login` принимает **form-data** (`OAuth2PasswordRequestForm`), поэтому работает кнопка **Authorize** в Swagger.
+- Под токеном: `POST/PUT/DELETE /api/admin-settings`, все `GET /api/applications*`, `GET /api/behavior-metrics*`. Публичные: `GET /api/admin-settings`, `POST /api/applications`, `POST /api/behavior-metrics`.
+- Фронт хранит токен в `sessionStorage` (обёрнуто в `try/catch`). При любом 401 он показывает экран входа.
 
-| Метод и путь | Ответ |
-|---|---|
-| `GET /api/health` | `{"status":"ok","db":"ok"}` (внутри — `SELECT 1`) |
-| `GET /api/admin-settings` | весь список услуг (`?only_active=true` — только активные) |
-| `POST /api/admin-settings` | 201 + услуга |
-| `GET/PUT/DELETE /api/admin-settings/{id}` | услуга / изменённая услуга / 204 |
-| `POST /api/applications` | 201 `{"id": 11, "message": "Заявка отправлена!"}` |
-| `GET /api/applications?limit=50` | заявки вместе с метриками |
-| `GET /api/applications/{id}` | заявка вместе с метриками |
+**Вручную**
 
-Тело `POST /api/applications` — один пакет. Backend сохраняет его в одной транзакции: либо обе строки, либо ни одной.
+1. `make dev`, откройте https://localhost/admin (или http://localhost/admin). Есть кнопка «Зарегистрироваться».
+2. Зарегистрируйтесь, нажмите «Выйти» и убедитесь, что кнопки больше нет.
+3. Swagger: http://localhost:8000/docs → **Authorize** → логин и пароль → **Authorize** → **Close**. Замок закрылся. Затем **GET /api/auth/me** → *Try it out* → *Execute* → **200**.
 
-```json
-{
-  "application": { "last_name": "Барский", "first_name": "Андрей", "phone": "+7 916 123-45-67",
-                   "service_id": 3, "role": "руководитель", "budget": "180000", "contact_method": "telegram" },
-  "metrics": { "time_on_page_sec": 312, "clicks": [{"el": "submit", "t": 311.4}],
-               "hovers": [{"el": "service", "ms": 1830}], "return_count": 1, "scroll_depth": 100,
-               "utm": {"utm_source": "yandex"}, "referrer": null, "user_agent": "...", "screen": "1920x1080", "language": "ru-RU" }
-}
+**Автоматически:** `make e2e`. Сценарий `e2e/admin_auth.spec.ts` проходит регистрацию, выход, проверку неверного пароля, «сломанный» токен и Swagger Authorize.
+
+## Пункт 2. Услуги: таблица CRUD
+
+**Вручную:** вкладка **«Услуги»** в админке. Справа — панель инструментов: **«Добавить строку»** и **«Обновить»**.
+
+- **Добавить:** «Добавить строку» → заполнить поля прямо в таблице → «Сохранить» (или Enter).
+- **Изменить:** кнопка «Изменить» или двойной щелчок по строке, затем «Сохранить» / Enter, отмена — Esc.
+- **Удалить:** «Удалить» → подтверждение в **своём модальном окне** (не `window.confirm`). Услуга сразу пропадает из выпадающего списка на главной.
+
+Создайте минимум 5 услуг, например:
+
+| Услуга | От, ₽ | До, ₽ |
+|---|---|---|
+| Полировка кузова | 15 000 | 60 000 |
+| Химчистка салона | 10 000 | 40 000 |
+| Керамическое покрытие | 50 000 | 250 000 |
+| Оклейка плёнкой PPF | 150 000 | 600 000 |
+| Установка аудиосистемы Bose премиум | 80 000 | 500 000 |
+
+Запасной путь — `make seed`: те же 5 услуг через API. Скрипт идемпотентен и входит как `DEMO_ADMIN_USER`.
+
+**Автоматически:** `e2e/services_crud.spec.ts` добавляет 5 строк, правит одну, удаляет одну и проверяет, что на главной её больше нет.
+
+## Пункт 3. Метрики и «Статистика пользователей»
+
+**Как устроено**
+
+- `frontend/src/behavior-metrics.js` на главной: `session_id` (`crypto.randomUUID`), счётчик секунд (только пока вкладка активна), клики по кнопкам и полям (по `data-track` или `id`/`name`), позиция курсора раз в секунду в долях 0..1 от размеров документа, `return_frequency` через `visibilitychange`.
+- Раз в секунду, пока вкладка видима, уходит `POST /api/behavior-metrics` со снимком в формате урока:
+  `{"application_id": 0, "time_on_page": 0, "buttons_clicked": "string", "cursor_positions": "string", "return_frequency": 0}` + `session_id`, `viewport_w/h`, `doc_w/h`, `page`. При закрытии страницы финальный снимок уходит через `navigator.sendBeacon`.
+- Метрики **анонимные**: `application_id` принимается, но не проверяется (nullable, без FK и без UNIQUE). С `session_id` строка обновляется (upsert, одна строка на визит). `buttons_clicked` и `cursor_positions` хранятся в JSONB, а строка, которая не парсится, сохраняется как `{"raw": ...}`.
+- Таблица части 2 (связь 1:1 с заявкой) мигрируется **автоматически при старте** backend: `sql/migrate_metrics_part3.sql` переименовывает её в `behavior_metrics_part2` и переносит данные в новый формат.
+- Кнопка **«Статистика пользователей»** в админке открывает полноэкранное окно: три карточки (день/неделя/месяц — среднее, максимум, число сессий), heatmap курсора на canvas (сетка 40×40, круги поверх схемы страницы, размер и цвет зависят от частоты) и топ кликов.
+
+**Вручную:** откройте главную и 2–3 минуты поводите мышью: выберите услугу, подвигайте ползунок, понажимайте поля, переключитесь на другую вкладку и вернитесь. Затем в админке нажмите «Статистика пользователей». Данные лежат в pgAdmin: http://localhost:5050 → **Servers → Autello → autello → Schemas → public → Tables → behavior_metrics** → правый клик → **View/Edit Data → All Rows**.
+
+**Автоматически:**
+
+- `make backfill` добавляет ~300 визитов за 30 дней (20–400 с, курсор кучкуется у поля услуги, ползунка и кнопки «Отправить»). Без истории средние за неделю и месяц были бы пустыми.
+- `e2e/visitor_activity.spec.ts` запускает 3 виртуальных посетителей одновременно. Один проводит на странице `VISIT_SECONDS` (150 с): курсор плавно ходит по кривым Безье между элементами формы, есть клики по полям, ползунку и кнопкам и уход на другую вкладку. Второй смотрит 25 с, третий заполняет и отправляет форму. Тест проверяет рост строк `behavior_metrics` во время визита и снимает heatmap.
+
+## Пункт 4. Приоритизация лидов
+
+**Балльная система 0–100** (`backend/app/services/lead_scoring.py`, пороги вынесены в константы):
+
+| Критерий | Максимум | Как считается |
+|---|---|---|
+| Бюджет | 30 | доля от `budget_max` услуги: ≥90% → 30, ≥70% → 24, ≥50% → 18, ≥30% → 10; бюджет ≥ 500 000 ₽ → 30 |
+| Срок | 25 | как можно скорее 25 · неделя 18 · месяц 10 · не срочно 3 · не указан 5 |
+| Размер компании | 15 | 200+ → 15 · 51–200 → 12 · 11–50 → 9 · 2–10 → 5 · только я → 2 |
+| Роль | 10 | собственник / руководитель 10 · сотрудник 4 |
+| Объём задачи | 10 | более 20 машин → 10 · 6–20 → 8 · регулярное обслуживание → 8 · 2–5 → 5 |
+| Ниша | 10 | автосалон, такси-парк, премиум-частник (марка или бюджет ≥ 300 000 ₽) → 10 · детейлинг 8 |
+
+**Температура:** 🔥 hot ≥ 70, 🌤 warm 40–69, ❄️ cold < 40. Кроме неё считаются `urgency`, `needs_personal_manager` (hot или бюджет ≥ 500 000 ₽), `department` (Корпоративный отдел / VIP-менеджер / Розничные продажи), `recommended_action` и `reasons[]` — почему заявка получила свой score. `LEAD_SCORING_MODE=llm_mock` добавляет «ИИ-резюме», которое собирается локально, без внешних вызовов.
+
+**Эндпоинты:** `GET /api/applications/ranked` (по score), `GET /api/applications/{id}` (заявка + оценка + метрики визита), `GET /api/applications/summary` (по температурам, по услугам, средний бюджет, за 7 и 30 дней).
+
+**10 тестовых заявок** — `sql/test_applications.sql`. Перед каждым блоком есть комментарий, почему заявка горячая или холодная:
+
+| | Заявка | Score | Сильная сторона |
+|---|---|---|---|
+| 🔥 | Воронцов, Bentley, PPF 600 000 ₽ | 72 | огромный бюджет → VIP-менеджер |
+| 🔥 | Кравцова, детейлинг-центр | 81 | срочно + руководитель |
+| 🔥 | Шестаков, дилерский центр 200+ | 71 | крупный автосалон |
+| 🔥 | Гусейнов, таксопарк 35 машин | 78 | большой объём (хотя пишет сотрудник) |
+| 🌤 | Лаптева, Ершов, Миронова | 55 / 48 / 47 | |
+| ❄️ | Пахомов, Зуева, Сидоренко | 32 / 24 / 15 | |
+
+**Вручную:** pgAdmin → правый клик по БД **autello** → **Query Tool** → вставьте `sql/test_applications.sql` → **F5**. Нужны услуги из пункта 2. Затем в админке откройте вкладку **«Заявки»**: сверху общая статистика, ниже таблица по score с бейджами и фильтрами. **«Просмотр»** открывает окно со всеми полями, разбором score, причинами и ссылками `tel:` и `mailto:`.
+
+**Автоматически:** `make test-sql`. `make pytest` (`backend/tests/test_lead_scoring.py`) читает тот же SQL-файл и проверяет ровно 4/3/3. `e2e/ranking.spec.ts` проверяет, что первые 4 строки — 🔥, и что «Просмотр» работает.
+
+## Пункт 5. Безопасность
+
+```bash
+make secure            # = остановить pgAdmin/registry + docker compose up --build -d
+make check             # блок «Безопасность (п.5)» в reports/check_report.md
 ```
 
-Каждый роут зарегистрирован дважды — с путём `""` и `"/"`. Поэтому `/api/applications` и `/api/applications/` отвечают одинаково, без 307.
+Ручная проверка:
 
-## Что эмулируется
+```bash
+curl -kI https://localhost             # HTTP/2 200, strict-transport-security
+curl -I  http://localhost              # 301 → https://localhost/
+curl     http://localhost:8000         # 403 Forbidden (заглушка nginx)
+curl     http://localhost:5432         # 403 Forbidden (заглушка nginx)
+curl     http://localhost:5050         # Connection refused — pgAdmin выключен
+curl -k  https://localhost/docs        # 404
+docker ps                              # порты опубликованы только у nginx
+```
 
-- **Внешних API-ключей задание не требует.** `OPENAI_API_KEY` в `.env` — заглушка для следующей части. `scripts/mock_gpt.py` при `MOCK_MODE=true` выдаёт `{lead_score, segment, summary}` по эвристике.
-- **Клиенты и их поведение** — `simulate_leads.py`: русские ФИО, телефоны +7, ниши (автосалон, детейлинг, такси-парк, частник), бюджет в пределах диапазона услуги, 40–600 с на странице, 3–25 кликов, наведения курсора, 0–3 возврата, UTM yandex/vk/telegram. Заявки идут через nginx, поэтому проверяется вся цепочка «фронт → nginx → backend → Postgres».
-- **Скриншоты для сдачи** делает Playwright в Docker (`make e2e`) и складывает в `reports/screens/`:
-  - `01_home.png`, `02_filled.png`, `03_success.png` — главная, заполненная форма, «Заявка отправлена!»;
-  - `04_admin.png` — админка;
-  - `05_docs.png`, `06_docs_get_list.png` — Swagger и ответ GET со списком услуг.
+- TLS: только 1.2 и 1.3, HTTP/2, HSTS (`max-age=31536000`, только в secure-режиме), `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`.
+- Сертификат: локально — самоподписанный (`make certs`), браузер покажет предупреждение, это ожидаемо. На VPS — Let's Encrypt, см. ниже.
 
-## Типичные ошибки урока и их причины
+### HTTPS на реальном VPS (Let's Encrypt)
+
+1. Купите домен, A-запись → IP сервера. В `.env` на сервере: `VPS_DOMAIN=autello.ru`, `LETSENCRYPT_EMAIL=you@mail.ru`, `MOCK_MODE=false`.
+2. `ufw allow 80,443/tcp`, затем `make certs && make secure` — стек поднимется с временным самоподписанным сертификатом.
+3. `bash scripts/letsencrypt.sh`. Certbot в контейнере пройдёт проверку через `/.well-known/acme-challenge/` (nginx отдаёт её даже в secure-режиме), пропишет `SSL_CERT_PATH`/`SSL_KEY_PATH` в `.env` и перезапустит nginx.
+4. Продление — cron: `0 3 * * 1 cd /opt/autello_barskiy && bash scripts/letsencrypt.sh --renew`.
+
+## Пункт 6. Логи
+
+```bash
+docker logs -f backend      # запросы uvicorn, «Вход: admin», «Новая заявка #…», миграции при старте
+docker logs -f nginx        # 301/403/404, пути запросов
+docker exec nginx cat /etc/nginx/conf.d/default.conf   # итоговый конфиг после envsubst
+```
+
+---
+
+## Что эмулируется и какие ключи нужны
+
+- **Внешних сервисов с API в задании нет.** Нужны только собственные секреты: `SECRET_KEY` для JWT (`make secret`, внутри `openssl rand -hex 32`) и SSL-сертификат (`make certs` локально, Let's Encrypt на VPS). Всё описано в `example.env`.
+- `OPENAI_API_KEY` — заглушка. `LEAD_SCORING_MODE=llm_mock` имитирует «ИИ-оценку» локально.
+- **2–3 минуты живой активности** имитирует Playwright (`visitor_activity.spec.ts`). В headless-браузере нет настоящего переключения вкладок, поэтому «уход на другую вкладку» эмулируется событием `visibilitychange`, на которое реагирует трекер.
+- **История метрик за месяц** — `scripts/backfill_metrics.py` (строки с `session_id` вида `backfill-…`, повторный запуск их пересоздаёт).
+- `make e2e` при `MOCK_MODE=true` очищает таблицу `admins`, чтобы проверить кнопку «Зарегистрироваться» на «чистой» БД. Затем тест заново регистрирует демо-админа (`DEMO_ADMIN_USER` / `DEMO_ADMIN_PASSWORD`). На боевом сервере (`MOCK_MODE=false`) таблица не трогается.
+
+## Новые и изменённые файлы части 3
+
+```
+backend/app/core/security.py        bcrypt + PyJWT
+backend/app/core/deps.py            get_current_admin (OAuth2PasswordBearer tokenUrl=/api/auth/login)
+backend/app/core/migrations.py      применение sql/*.sql при старте
+backend/app/models/admin.py         admins + AdminCRUD (SQL в docstring)
+backend/app/models/behavior_metrics.py   анонимные метрики, upsert, статистика и heatmap
+backend/app/routers/auth.py         check / register / login / me
+backend/app/routers/behavior_metrics.py  POST (публичный), GET и /stats (токен)
+backend/app/routers/applications.py /ranked, /summary, /{id} с оценкой
+backend/app/services/lead_scoring.py балльная система 0–100
+backend/tests/test_lead_scoring.py  pytest: 10 заявок из SQL → 4/3/3
+sql/schema_part3.sql                admins, behavior_metrics, CHECK роли
+sql/migrate_metrics_part3.sql       миграция метрик части 2 → 3
+sql/test_applications.sql           10 тестовых заявок
+frontend/API.md                     шпаргалка по API (фронт сделан строго по ней)
+frontend/src/behavior-metrics.js    метрики раз в секунду + sendBeacon
+frontend/src/admin.*                вход, заявки, услуги, статистика
+nginx/templates/modes/{dev,secure}.conf.template   режимы порта 80 и заглушки 403
+nginx/templates/snippets/site.conf.template        сайт (общий для 80 и 443)
+docker-compose.dev.yml              dev-режим поверх основного compose
+e2e/*.spec.ts                       Playwright: 5 сценариев части 3 + регресс формы
+scripts/gen_secret.sh, gen_selfsigned.sh, letsencrypt.sh, backfill_metrics.py, check.sh, check.ps1
+```
+
+## Типичные ошибки урока и как они решены
 
 | Симптом | Причина | Как сделано здесь |
 |---|---|---|
-| **CSS 404** или «Refused to apply style… MIME type text/html» | 1) `style-loader`: CSS вшит в JS, отдельного файла нет. 2) Относительный `publicPath`: на `/admin/` ссылка превращается в `/admin/assets/...` (или `/pgadmin/...`). 3) Неверный `root` или `location` в nginx. 4) `try_files ... /index.html` для статики: вместо отсутствующего CSS отдаётся HTML | `mini-css-extract-plugin`, `publicPath: "/"`, `root /usr/share/nginx/html` с примонтированным `frontend/dist`, у `/assets/` — `try_files $uri =404` |
-| **405 Not Allowed** | `proxy_pass http://backend:8000/;` (со слэшем) срезает `/api/` → FastAPI не находит роут. Или POST попадает в `location /` и уходит в статику: nginx отвечает 405 на POST к файлу | `location /api/ { proxy_pass http://backend:8000; }` без слэша и без переписывания, роутеры с `prefix="/api"` |
-| **307 Temporary Redirect** | FastAPI с `redirect_slashes=True` редиректит `/api/x/` → `/api/x` на внутренний адрес `http://backend:8000/...`, браузер туда не попадает. Тело POST при этом теряется | `redirect_slashes=False` и дубли путей `""` / `"/"` |
-| **«Input should be a valid string»** после POST | В схеме ответа `id: str` или `created_at: str`, а модель отдаёт `int` и `datetime`. Pydantic 2 не приводит их к строке | Out-схемы: `id: int`, `created_at: datetime`, `from_attributes=True` |
-| **Бесконечная загрузка услуг** | Фронт вызывает `/latest` (одна запись или 404) вместо списка, ошибка не обрабатывается, спиннер не гаснет | `GET /api/admin-settings` — весь список. На фронте таймаут 8 с, состояния «ошибка» с кнопкой «Повторить» и «услуг нет» |
-| **`npm: command not found`** | На машине или VPS нет Node.js | `make build-front` сам переключается на контейнер `node:20-alpine` (профиль `tools`) |
-| **502 после обновления backend** | nginx запомнил старый IP контейнера, а Watchtower пересоздал контейнер | `resolver 127.0.0.11 valid=10s` и адрес backend в переменной |
-
-Где искать ошибки: `docker logs -f backend` (Traceback, 422 с текстом ошибки валидации), `docker logs -f nginx` (404/405/502, путь запроса) и итоговый конфиг `docker exec nginx cat /etc/nginx/conf.d/default.conf`.
-
-## Деплой на VPS
-
-Первичная настройка сервера (SSH-ключ, Docker, rsync) — в разделе «Часть 1» ниже. Для части 2 дополнительно:
-
-1. В `.env` на сервере:
-   - `MOCK_MODE=false`;
-   - `DOCS_ENABLED=false` (или `true` на время проверки);
-   - `CORS_ORIGINS=http://<IP-или-домен>`;
-   - `REGISTRY_HOST=<IP-или-домен>`, `REGISTRY_PORT=5000`.
-2. Соберите фронт: `make build-front` (на VPS без Node.js сработает контейнер) — или передайте готовый `frontend/dist` через rsync.
-3. Первый запуск: `make up`, затем создайте услуги через Swagger или `make seed`.
-4. **Обновление backend через registry и Watchtower:**
-   ```bash
-   # на машине разработчика (или прямо на VPS)
-   make push        # docker login → docker compose build backend → docker compose push backend
-   ```
-   Watchtower проверяет реестр каждые `WATCHTOWER_POLL_INTERVAL` секунд. Найдя новый `autello-backend:latest`, он сам пересоздаёт контейнер `backend` (у него есть метка `com.centurylinklabs.watchtower.enable=true`). Postgres без метки, автоматически его не обновляем.
-   - Для push по HTTP на `<IP>:5000` нужен `insecure-registries` или TLS — см. «TLS для реестра».
-   - Локально (`REGISTRY_HOST=localhost`) Watchtower изнутри своего контейнера не видит `localhost:5001`, поэтому в его логе будут предупреждения о pull. На работу стека они не влияют.
-5. Проверка на сервере: `ssh autello-vps 'cd /opt/autello_barskiy && bash scripts/check.sh'`.
+| **404 на `/api/auth/check`** | Лишний префикс: `proxy_pass http://backend:8000/api/;` превращает запрос в `/api/api/auth/check` | `location /api/ { proxy_pass http://backend:8000; }` без слэша и без URI. `check.sh` проверяет, что `/api/api/...` = 404, а `/api/auth/check` = 200 |
+| **«Behavior metrics for application 0 already exists»** | В части 2 `application_id` был первичным ключом, а фронт и Swagger шлют `0` | `application_id` nullable, без FK и UNIQUE; один визит = одна строка по `session_id`. Миграция — при старте |
+| **`ImportError: email-validator is not installed`** | `EmailStr` без `pydantic[email]` | В `requirements.txt` — `pydantic[email]` |
+| **`AttributeError: module 'bcrypt' has no attribute '__about__'`** | passlib + bcrypt ≥ 4.1 | bcrypt напрямую, без passlib |
+| **Таблица услуг пустая или падает `.map is not a function`** | Ответ не массив (ошибка, `/latest` вместо списка) | Фронт проверяет `Array.isArray`, при ошибке показывает текст в таблице |
+| **Изменения фронта не видны** | Кеш браузера после `npm run build` | Ctrl+F5 / Cmd+Shift+R. Ассеты с `contenthash`, HTML с `Cache-Control: no-cache` |
+| **Схема БД «поломалась» после экспериментов** | Таблицы создаются один раз (`create_all` не меняет существующие) | `docker compose stop backend` (иначе БД занята) → pgAdmin: правый клик по БД **autello** → **Delete** → **Create → Database** `autello`, владелец `autello` → `docker compose start backend`: таблицы создадутся заново. Или полностью: `make clean && make all` |
+| **401 в Swagger** | Не нажата кнопка Authorize или истёк токен (120 мин) | Authorize → логин/пароль. Логин — form-data, не JSON |
+| **307 / 405 на POST** | Слэш в конце или `proxy_pass` со слэшем | `redirect_slashes=False`, каждый роут с `""` и `"/"` |
+| **nginx не стартует: `cannot load certificate`** | Нет сертификата | `make certs` перед первым запуском |
 
 ## Чек-лист скриншотов для сдачи
 
-1. Swagger с тремя услугами: `reports/screens/05_docs.png` (или скриншот после ручного POST).
-2. Ответ GET со списком: `reports/screens/06_docs_get_list.png`.
-3. Главная страница: `01_home.png`, заполненная форма: `02_filled.png`.
-4. Сообщение «Заявка отправлена!»: `03_success.png`.
-5. pgAdmin с таблицей `applications` (View/Edit Data) — снимите вручную, путь описан выше.
-6. Терминал с `docker ps`: backend без опубликованных портов, nginx `0.0.0.0:80`.
-7. `reports/check_report.md` с итогом «✅ Все проверки пройдены».
+Автоматические (`make e2e`) лежат в `reports/screens/`:
+
+| Файл | Что на нём | Пункт |
+|---|---|---|
+| `login_with_register.png` | вход на чистой БД, есть «Зарегистрироваться» | 1 |
+| `login_without_register.png` | после регистрации кнопки нет | 1 |
+| `swagger_authorized.png` | Swagger: Authorize, `GET /api/auth/me` → 200 | 1 |
+| `services_table.png` | таблица услуг с панелью инструментов справа | 2 |
+| `home_service_list.png` | список услуг на главной без удалённой | 2 |
+| `stats_modal_heatmap.png` | «Статистика пользователей»: периоды, heatmap, топ кликов | 3 |
+| `applications_ranked.png` | заявки по приоритету, сводка сверху | 4 |
+| `application_details.png` | «Просмотр»: детали, причины, tel:/mailto: | 4 |
+
+Снять вручную:
+
+1. pgAdmin: `behavior_metrics` → View/Edit Data (пункт 3) и Query Tool с `sql/test_applications.sql` (пункт 4).
+2. Терминал: `make secure` и `curl` из пункта 5 (301, 403, 404, `Connection refused`), а также `docker ps`.
+3. Терминал: `docker logs -f backend` (пункт 6).
+4. `reports/check_report.md` с итогом «✅ Все проверки пройдены».
 
 ## Упаковка и GitHub
 
-`.env`, `registry/auth/htpasswd`, `node_modules/`, `frontend/dist/`, `mock/` и `reports/` исключены в `.gitignore`. Если нужно показать сборку, уберите строку `frontend/dist/` из `.gitignore`. Если нужно показать отчёт и скриншоты, уберите `reports/`: паролей в них нет.
+`.env`, `nginx/certs/` (ключи TLS), `registry/auth/htpasswd`, `node_modules/`, `frontend/dist/`, `mock/` и `reports/` исключены в `.gitignore`. Чтобы показать отчёт и скриншоты, уберите строку `reports/` — паролей в них нет.
 
 **Zip без секретов** (из папки над проектом):
 
 ```bash
 zip -r Autello_Barskiy.zip Autello_Barskiy \
-  -x 'Autello_Barskiy/.env' 'Autello_Barskiy/registry/auth/htpasswd' \
-     '*/node_modules/*' 'Autello_Barskiy/mock/*' '*/.DS_Store'
-# чтобы не включать сборку, добавьте: 'Autello_Barskiy/frontend/dist/*'
+  -x 'Autello_Barskiy/.env' 'Autello_Barskiy/nginx/certs/*' 'Autello_Barskiy/registry/auth/htpasswd' \
+     '*/node_modules/*' 'Autello_Barskiy/mock/*' '*/.DS_Store' '*/__pycache__/*'
+```
+
+PowerShell:
+
+```powershell
+$files = git ls-files; Compress-Archive -Path $files -DestinationPath ..\Autello_Barskiy.zip   # только то, что в git
 ```
 
 **GitHub:**
 
 ```bash
-git add . && git status          # убедитесь, что .env, htpasswd и node_modules НЕ в списке
-git commit -m "Autello: backend FastAPI + фронтенд + nginx (Кейс 3, часть 2)"
+git add . && git status          # .env, nginx/certs, htpasswd и node_modules НЕ должны быть в списке
+git commit -m "Autello: JWT, услуги, метрики, приоритизация, HTTPS (Кейс 3, часть 3)"
 git push
 ```
 
 ---
+
+## Часть 2: справка
+
+- **API части 2 не сломан:** `POST /api/applications` по-прежнему принимает пакет `{"application": {...}, "metrics": {...}}`, `scripts/simulate_leads.py` работает. Новое: необязательный `session_id`, а метрики формата части 2 сохраняются отдельной строкой в `behavior_metrics`.
+- `e2e/form.spec.ts` — регресс формы части 2 (скриншоты `01_home`–`03_success`).
+- Создание услуг через Swagger: **Authorize** → **POST /api/admin-settings** → *Try it out* → JSON `{"services": "Полировка кузова", "budget_min": 15000, "budget_max": 60000}` → **201**.
 
 ## Часть 1: инфраструктура (справка)
 
@@ -264,7 +349,7 @@ docker run --rm httpd:2 htpasswd -Bbn $e.REGISTRY_USER $e.REGISTRY_PASSWORD | Se
 4. **Docker:** `bash scripts/install_docker.sh` — Docker CE и `docker-compose-plugin` из официального репозитория.
 5. **Деплой:** `bash scripts/deploy_to_vps.sh` — rsync в `/opt/autello_barskiy` и `docker compose up -d`.
 
-Файрвол: `ufw allow OpenSSH; ufw allow 80,443,5000,5050,8080/tcp; ufw enable`. Docker публикует порты в обход ufw, поэтому главная защита — отсутствие `ports:` у postgres и backend.
+Файрвол: `ufw allow OpenSSH; ufw allow 80,443/tcp; ufw enable` (в части 3 наружу нужен только nginx; порты 5000/5050/8080 открывайте лишь на время dev-режима). Docker публикует порты в обход ufw, поэтому главная защита — отсутствие `ports:` у postgres и backend.
 
 ### TLS для реестра
 
@@ -287,6 +372,6 @@ Docker без TLS разрешает push только на `localhost`. Что�
 | Watchtower: `client version 1.25 is too old` | Нужен `nickfedor/watchtower`, а не `containrrr/watchtower` |
 | nginx не стартует: `open() ".../docs_xxx.conf" failed` | `DOCS_ENABLED` должен быть строго `true` или `false` |
 | Порт 8000 на хосте отвечает | Это другой процесс или контейнер. Backend стека порт не публикует, `check.sh` укажет владельца |
-| Таблицы части 2 не появились | Их создаёт backend при старте (`create_all`). Смотрите `docker logs backend` |
+| Таблицы не появились | Их создаёт backend при старте (миграция → `create_all` → `sql/schema_part3.sql`). Смотрите `docker logs backend` |
 
 Таблица `leads` и скрипт `seed_leads.py` остались от части 1. Новая форма пишет в `applications` и `behavior_metrics`.

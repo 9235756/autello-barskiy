@@ -1,0 +1,11 @@
+# ===== make dev: всё для отладки =====
+# Порт 80 отдаёт сайт без редиректа, https на 443 тоже работает.
+# Swagger на http://localhost:8000/docs (backend проброшен на 127.0.0.1) и через nginx /docs.
+
+map $host $hsts_value { default ""; }
+
+server {
+    listen 80 default_server;
+    server_name _;
+    include /etc/nginx/conf.d/snippets/site.conf;
+}

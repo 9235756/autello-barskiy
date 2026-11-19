@@ -1,7 +1,0 @@
-{
-  "name": "autello-e2e",
-  "private": true,
-  "description": "Браузерный тест формы заявки (Playwright). Запуск: make e2e",
-  "scripts": { "test": "playwright test" },
-  "devDependencies": { "@playwright/test": "1.49.1" }
-}

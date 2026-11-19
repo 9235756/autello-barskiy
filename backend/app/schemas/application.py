@@ -21,7 +21,7 @@ class ApplicationIn(BaseModel):
     business_niche: str | None = Field(default=None, max_length=100, examples=["Детейлинг-центр"])
     company_size: str | None = Field(default=None, max_length=50)
     task_volume: str | None = Field(default=None, max_length=100)
-    role: Literal["сотрудник", "руководитель"] = Field(examples=["руководитель"])
+    role: Literal["сотрудник", "руководитель", "собственник"] = Field(examples=["руководитель"])
     need_volume: str | None = Field(default=None, max_length=100)
     deadline: str | None = Field(default=None, max_length=100)
     task_type: str | None = Field(default=None, max_length=100)
@@ -80,32 +80,20 @@ class MetricsIn(BaseModel):
 
 
 class ApplicationPacket(BaseModel):
-    """Тело POST /api/applications."""
+    """Тело POST /api/applications.
+
+    session_id — номер визита из behavior-metrics.js: backend проставит этому визиту номер заявки.
+    metrics — формат части 2, необязателен (оставлен для совместимости со скриптами).
+    """
 
     application: ApplicationIn
-    metrics: MetricsIn = Field(default_factory=MetricsIn)
+    metrics: MetricsIn | None = None
+    session_id: str | None = Field(default=None, max_length=64)
 
 
 class ApplicationCreated(BaseModel):
     id: int
     message: str = "Заявка отправлена!"
-
-
-class MetricsOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    application_id: int
-    time_on_page_sec: int
-    clicks: list[dict[str, Any]]
-    hovers: list[dict[str, Any]]
-    return_count: int
-    scroll_depth: int
-    utm: dict[str, Any]
-    referrer: str | None
-    user_agent: str | None
-    screen: str | None
-    language: str | None
-    created_at: datetime
 
 
 class ApplicationOut(BaseModel):
@@ -132,4 +120,52 @@ class ApplicationOut(BaseModel):
     contact_time: str | None
     comment: str | None
     created_at: datetime
-    metrics: MetricsOut | None = None
+
+
+class LeadScoreOut(BaseModel):
+    """Результат app/services/lead_scoring.py."""
+
+    score: int = Field(ge=0, le=100)
+    temperature: Literal["hot", "warm", "cold"]
+    temperature_label: str
+    urgency: str
+    needs_personal_manager: bool
+    department: str
+    recommended_action: str
+    reasons: list[str]
+    breakdown: dict[str, int]
+    engine: str
+    ai_summary: str | None = None
+
+
+class ApplicationRanked(ApplicationOut):
+    """Заявка + оценка (для списка по приоритету и для «Просмотр»)."""
+
+    scoring: LeadScoreOut
+
+
+class SessionMetricsOut(BaseModel):
+    """Метрики визита, из которого отправлена заявка (если найден)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    time_on_page: int
+    buttons_clicked: dict[str, Any]
+    return_frequency: int
+    extra: dict[str, Any]
+    updated_at: datetime
+
+
+class ApplicationDetail(ApplicationRanked):
+    metrics: SessionMetricsOut | None = None
+
+
+class ApplicationsSummary(BaseModel):
+    total: int
+    by_temperature: dict[str, int]
+    by_service: list[dict[str, Any]]
+    avg_budget: int | None
+    last_7_days: int
+    last_30_days: int
+    needs_personal_manager: int
+    avg_score: float

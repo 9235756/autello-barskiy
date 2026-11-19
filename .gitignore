@@ -18,3 +18,8 @@ __pycache__/
 node_modules/
 # dist — результат npm run build. Уберите эту строку, если хотите показать сборку в репозитории
 frontend/dist/
+
+# Часть 3: сертификаты и ключи TLS, webroot certbot, e2e
+nginx/certs/
+nginx/certbot-www/
+e2e/node_modules/

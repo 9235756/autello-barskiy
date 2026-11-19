@@ -3,6 +3,8 @@ import './styles/base.css';
 import './styles/main.css';
 import { api, rub } from './api';
 import { getMetrics } from './tracker';
+// Часть 3: анонимные метрики раз в секунду → POST /api/behavior-metrics
+import { sessionId, setApplicationId } from './behavior-metrics';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -186,8 +188,12 @@ form.addEventListener('submit', async (e) => {
   submitBtn.disabled = true;
   submitBtn.classList.add('is-loading');
   try {
-    // Заявка и метрики — ОДНИМ пакетом, backend сохраняет их в одной транзакции
-    const res = await api('/applications', { method: 'POST', body: { application, metrics: getMetrics() } });
+    // Заявка + session_id визита (backend проставит визиту номер заявки) + метрики формата части 2
+    const res = await api('/applications', {
+      method: 'POST',
+      body: { application, session_id: sessionId, metrics: getMetrics() },
+    });
+    if (res && res.id) setApplicationId(res.id);
     showSuccess(res);
   } catch (err) {
     formError.textContent = `Не удалось отправить заявку: ${err.message}. Попробуйте ещё раз.`;

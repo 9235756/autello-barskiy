@@ -1,0 +1,50 @@
+# ===== make secure: защищённый режим (пункт 5 домашки) =====
+
+# HSTS: браузер год ходит на этот домен только по https (без includeSubDomains — безопаснее для учёбы)
+map $host $hsts_value { default "max-age=31536000"; }
+
+# Порт 80: только редирект на https (+ проверка Let's Encrypt и healthcheck контейнера)
+server {
+    listen 80 default_server;
+    server_name _;
+    server_tokens off;
+
+    # certbot --webroot кладёт сюда файл-подтверждение; Let's Encrypt проверяет его по http
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type text/plain;
+    }
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ---------- Имитация закрытых портов по требованию задания ----------
+# Реальные backend (8000) и PostgreSQL (5432) наружу НЕ опубликованы вообще —
+# они только в docker-сети internal. Закрытый порт обычно просто отклоняет соединение,
+# а задание просит «код 403». Поэтому эти порты слушает nginx и на любой HTTP-запрос
+# отвечает 403 Forbidden. До backend и postgres такие запросы не доходят.
+server {
+    listen 8000;
+    server_name _;
+    server_tokens off;
+    access_log off;
+    default_type text/plain;
+    return 403 "403 Forbidden: backend недоступен снаружи\n";
+}
+
+server {
+    listen 5432;
+    server_name _;
+    server_tokens off;
+    access_log off;
+    default_type text/plain;
+    return 403 "403 Forbidden: PostgreSQL недоступен снаружи\n";
+}

@@ -1,10 +1,9 @@
-// Браузерный тест: главная → выбор услуги → ползунок → форма → «Заявка отправлена!».
-// Плюс скриншоты /admin и /docs для сдачи. Всё складывается в reports/screens/.
+// Браузерный тест части 2 (оставлен как регресс): главная → услуга → ползунок → форма → «Заявка отправлена!».
+// Скриншоты 01–03 складываются в reports/screens/. Админка и Swagger части 3 — в других spec-файлах.
 import { test, expect, type Page } from '@playwright/test';
 import fs from 'node:fs';
 
 const SHOTS = process.env.SCREENS_DIR || '/reports/screens';
-const DOCS_ENABLED = (process.env.DOCS_ENABLED || 'false').toLowerCase() === 'true';
 fs.mkdirSync(SHOTS, { recursive: true });
 
 // Ловим 4xx/5xx по статике и API — CSS 404 из урока не должен проскочить незамеченным
@@ -80,8 +79,9 @@ test('главная: выбор услуги, заполнение формы, 
   expect(body.message).toBe('Заявка отправлена!');
   expect(typeof body.id).toBe('number');
 
-  // Метрики ушли тем же пакетом
+  // В пакете — session_id визита (часть 3) и метрики формата части 2
   const sent = response.request().postDataJSON();
+  expect(sent.session_id).toMatch(/^[0-9a-f-]{36}$/);
   expect(sent.metrics.utm.utm_source).toBe('yandex');
   expect(sent.metrics.clicks.length).toBeGreaterThan(0);
 
@@ -91,31 +91,4 @@ test('главная: выбор услуги, заполнение формы, 
   await page.screenshot({ path: `${SHOTS}/03_success.png` });
 
   expect(bad, `ошибки загрузки: ${bad.join(', ')}`).toEqual([]);
-});
-
-test('админка: услуги и последние заявки', async ({ page }) => {
-  const bad = watchBadResponses(page);
-  await page.goto('/admin');
-  await expect(page.locator('#svcTable tbody tr', { hasText: 'Керамическое покрытие' })).toHaveCount(1);
-  await expect(page.locator('#appTable tbody tr', { hasText: 'Тестов' }).first()).toBeVisible();
-  await page.evaluate(() => document.fonts.ready);
-  await page.screenshot({ path: `${SHOTS}/04_admin.png`, fullPage: true });
-  expect(bad, `ошибки загрузки: ${bad.join(', ')}`).toEqual([]);
-});
-
-test('Swagger: /docs и GET /api/admin-settings через Try it out', async ({ page }) => {
-  test.skip(!DOCS_ENABLED, 'DOCS_ENABLED=false — Swagger закрыт, как и должно быть в продакшене');
-  await page.goto('/docs');
-  const op = page.locator('.opblock-get', { hasText: '/api/admin-settings' }).first();
-  await expect(op).toBeVisible();
-  await page.screenshot({ path: `${SHOTS}/05_docs.png`, fullPage: true });
-
-  await op.locator('.opblock-summary').click();
-  await op.getByRole('button', { name: 'Try it out' }).click();
-  await op.getByRole('button', { name: 'Execute' }).click();
-  const resp = op.locator('.responses-wrapper .live-responses-table');
-  await expect(resp).toContainText('200');
-  await expect(resp).toContainText('Керамическое покрытие');
-  await op.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOTS}/06_docs_get_list.png`, fullPage: true });
 });

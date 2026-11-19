@@ -3,3 +3,7 @@
 add_header X-Content-Type-Options "nosniff" always;
 add_header X-Frame-Options "SAMEORIGIN" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+# HSTS: значение задаёт режим (modes/*.conf). В dev оно пустое — nginx заголовок не отправит,
+# чтобы браузер не «запомнил» https для localhost и не сломал http://localhost:5050 и т.п.
+add_header Strict-Transport-Security $hsts_value always;

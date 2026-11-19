@@ -12,7 +12,7 @@ SSH=(ssh -i "$VPS_SSH_KEY_PATH" "$VPS_USER@$VPS_HOST")
 if is_mock; then
   say "MOCK_MODE=true — деплой на реальный сервер не выполняется."
   mock "rsync -az --delete --exclude mock/ --exclude reports/ --exclude .git/ ./ $VPS_USER@$VPS_HOST:$DEST/"
-  mock "ssh $VPS_USER@$VPS_HOST 'cd $DEST && chmod 600 .env && cd registry && ./create-user.sh \$REGISTRY_USER *** && cd .. && docker compose pull && docker compose up -d'"
+  mock "ssh $VPS_USER@$VPS_HOST 'cd $DEST && chmod 600 .env && ./registry/create-user.sh ... && bash scripts/gen_secret.sh && bash scripts/gen_selfsigned.sh && docker compose up -d --build'"
   say "Локальный эквивалент: make up"
   exit 0
 fi
@@ -25,6 +25,7 @@ say "Синхронизирую проект в $VPS_USER@$VPS_HOST:$DEST"
 rsync -az --delete \
   --exclude '.git/' --exclude 'mock/' --exclude 'reports/' --exclude '.DS_Store' \
   --exclude 'registry/auth/htpasswd' \
+  --exclude 'nginx/certs/' --exclude 'nginx/certbot-www/' --exclude 'node_modules/' \
   -e "ssh -i $VPS_SSH_KEY_PATH" ./ "$VPS_USER@$VPS_HOST:$DEST/"
 
 say "Создаю пользователя реестра и поднимаю стек"
@@ -35,13 +36,17 @@ chmod 600 .env
 mkdir -p /root/.docker && [ -f /root/.docker/config.json ] || echo '{}' > /root/.docker/config.json
 chmod +x registry/create-user.sh scripts/*.sh
 ./registry/create-user.sh '$REGISTRY_USER' '$REGISTRY_PASSWORD'
-docker compose pull
-docker compose up -d --remove-orphans
+# Часть 3: секрет JWT и временный самоподписанный сертификат (если Let's Encrypt ещё не получен)
+bash scripts/gen_secret.sh
+bash scripts/gen_selfsigned.sh
+docker compose pull --ignore-buildable --ignore-pull-failures
+# Защищённый режим (пункт 5): наружу только nginx
+docker compose up -d --build --remove-orphans
 docker compose ps
 EOF
 
 say "Готово. Откройте:"
-echo "  http://$VPS_HOST:$HTTP_PORT            — сайт"
-echo "  http://$VPS_HOST:$REGISTRY_UI_PORT     — Registry UI"
-echo "  http://$VPS_HOST:$PGADMIN_PORT         — pgAdmin"
-warn "Без TLS пароли летят открытым текстом — см. README, раздел «TLS для реестра»."
+echo "  https://$VPS_HOST/             — сайт (http → 301 на https)"
+echo "  https://$VPS_HOST/admin        — админка"
+echo "  Сертификат Let's Encrypt: ssh на сервер → bash scripts/letsencrypt.sh (нужен VPS_DOMAIN)"
+echo "  pgAdmin и registry в защищённом режиме выключены (профиль admin-tools)"

@@ -14,6 +14,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY app ./app
+# Тесты лежат в образе: make pytest запускает их в том же окружении, что и прод
+COPY tests ./tests
 
 # Не запускаем приложение от root
 RUN useradd --system --uid 10001 app

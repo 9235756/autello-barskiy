@@ -1,0 +1,62 @@
+# Сайт целиком: подключается в server на 443 (всегда) и на 80 (только в dev-режиме).
+
+root  /usr/share/nginx/html;
+index index.html;
+
+server_tokens off;
+# Редиректы (например /admin → /admin/) — относительные, без внутреннего порта/хоста
+absolute_redirect off;
+charset utf-8;
+
+gzip on;
+gzip_types text/css application/javascript application/json image/svg+xml;
+gzip_min_length 1024;
+
+include /etc/nginx/conf.d/snippets/security_headers.conf;
+
+location = /healthz {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+}
+
+# ---------- API ----------
+# БЕЗ завершающего слэша и без URI-части: запрос /api/auth/check уходит
+# на backend как /api/auth/check — путь не переписывается и не обрезается.
+# (proxy_pass http://backend:8000/api/ дал бы /api/api/... → 404 на /api/auth/check,
+#  а proxy_pass http://backend:8000/ срезал бы /api/ → 404/405 на стороне FastAPI.)
+location /api/ {
+    set $backend_upstream http://backend:${BACKEND_INTERNAL_PORT};
+    proxy_pass $backend_upstream;
+    include /etc/nginx/conf.d/snippets/proxy_params.conf;
+    # Снимок метрик с курсором за час — десятки КБ; 1 МБ с запасом
+    client_max_body_size 1m;
+}
+
+# ---------- Swagger ----------
+# docs_true.conf проксирует /docs и /openapi.json, docs_false.conf отвечает 404.
+include /etc/nginx/conf.d/docs/docs_${DOCS_ENABLED}.conf;
+
+# ---------- Статика сборки webpack ----------
+# Имена с contenthash → кешируем на год. try_files ... =404: отсутствующий
+# CSS/JS отдаёт честный 404, а НЕ index.html (иначе «Refused to apply style… MIME type»).
+location /assets/ {
+    try_files $uri =404;
+    add_header Cache-Control "public, max-age=31536000, immutable" always;
+    include /etc/nginx/conf.d/snippets/security_headers.conf;
+    access_log off;
+}
+
+# ---------- Админка ----------
+location /admin {
+    try_files $uri $uri/index.html /admin/index.html;
+    add_header Cache-Control "no-cache" always;
+    include /etc/nginx/conf.d/snippets/security_headers.conf;
+}
+
+# ---------- Клиентская страница ----------
+location / {
+    try_files $uri $uri/ /index.html;
+    add_header Cache-Control "no-cache" always;
+    include /etc/nginx/conf.d/snippets/security_headers.conf;
+}

@@ -10,71 +10,178 @@
   <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@500;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
 </head>
 <body class="admin">
-  <header class="admin__top">
-    <div class="wrap admin__bar">
-      <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"></span>Autello Barskiy</a>
-      <span class="badge">Авторизация будет добавлена позже · ADMIN_TOKEN уже заготовлен в .env</span>
-    </div>
-  </header>
 
-  <main class="wrap">
-    <section class="block" aria-labelledby="svc-title">
-      <div class="block__head">
-        <div>
-          <h1 id="svc-title">Услуги</h1>
-          <p class="muted">То, что клиент видит в выпадающем списке на главной. Границы бюджета задают ползунок.</p>
-        </div>
-        <button type="button" class="btn btn--ghost" id="reloadServices">Обновить</button>
-      </div>
+  <!-- ================= Экран входа ================= -->
+  <main class="auth" id="authView" hidden>
+    <div class="auth__card">
+      <p class="brand"><span class="brand__mark" aria-hidden="true"></span>Autello Barskiy</p>
+      <h1 class="auth__title" id="authTitle">Вход в админку</h1>
+      <p class="auth__lead" id="authLead">Заявки, услуги и статистика посетителей.</p>
 
-      <form id="svcForm" class="svc-form" novalidate>
-        <div class="svc-form__name">
-          <label for="f_services">Название</label>
-          <input id="f_services" name="services" required minlength="2" maxlength="200" placeholder="Керамическое покрытие">
+      <form id="authForm" class="auth__form" novalidate>
+        <div class="field">
+          <label for="authUser">Логин</label>
+          <input id="authUser" name="username" autocomplete="username" required minlength="3" maxlength="50" spellcheck="false">
         </div>
-        <div>
-          <label for="f_min">Бюджет от, ₽</label>
-          <input id="f_min" name="budget_min" type="number" min="0" step="1000" required placeholder="50000">
+        <div class="field">
+          <label for="authPass">Пароль</label>
+          <input id="authPass" name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="72">
+          <p class="field__hint" id="authPassHint" hidden>Не короче 8 символов. Восстановления пароля нет — сохраните его.</p>
         </div>
-        <div>
-          <label for="f_max">до, ₽</label>
-          <input id="f_max" name="budget_max" type="number" min="0" step="1000" required placeholder="250000">
-        </div>
-        <div>
-          <label for="f_range">Подпись</label>
-          <input id="f_range" name="budget_range" maxlength="50" placeholder="авто: 50к–250к">
-        </div>
-        <button type="submit" class="btn">Добавить</button>
+        <p class="form-msg" id="authMsg" role="alert"></p>
+        <button type="submit" class="btn btn--block" id="authSubmit">Войти</button>
       </form>
-      <p class="msg" id="svcMsg" role="status" aria-live="polite"></p>
 
-      <div class="table-wrap">
-        <table class="table" id="svcTable">
-          <thead>
-            <tr><th>ID</th><th>Название</th><th>Подпись</th><th class="num">От, ₽</th><th class="num">До, ₽</th><th>Активна</th><th>Обновлена</th><th></th></tr>
-          </thead>
-          <tbody><tr><td colspan="8" class="muted">Загрузка…</td></tr></tbody>
-        </table>
+      <!-- Показывается ТОЛЬКО если GET /api/auth/check вернул has_admins=false -->
+      <div class="auth__register" id="registerBox" hidden>
+        <p>Администраторов ещё нет. Первый зарегистрированный станет администратором, после этого регистрация закроется.</p>
+        <button type="button" class="btn btn--ghost btn--block" id="registerBtn">Зарегистрироваться</button>
       </div>
-    </section>
-
-    <section class="block" aria-labelledby="app-title">
-      <div class="block__head">
-        <div>
-          <h2 id="app-title">Последние заявки</h2>
-          <p class="muted">20 последних заявок с сайта вместе с поведенческими метриками.</p>
-        </div>
-        <button type="button" class="btn btn--ghost" id="reloadApps">Обновить</button>
-      </div>
-      <div class="table-wrap">
-        <table class="table" id="appTable">
-          <thead>
-            <tr><th>№</th><th>Дата</th><th>ФИО</th><th>Телефон</th><th>Услуга</th><th class="num">Бюджет</th><th>Роль</th><th>Связь</th><th class="num">На странице</th><th class="num">Клики</th><th>UTM</th></tr>
-          </thead>
-          <tbody><tr><td colspan="11" class="muted">Загрузка…</td></tr></tbody>
-        </table>
-      </div>
-    </section>
+      <button type="button" class="link-btn auth__back" id="backToLogin" hidden>← У меня уже есть логин</button>
+    </div>
   </main>
+
+  <!-- ================= Админка ================= -->
+  <div class="shell" id="appView" hidden>
+    <header class="topbar">
+      <div class="topbar__in">
+        <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"></span>Autello Barskiy</a>
+        <nav class="tabs" role="tablist" aria-label="Разделы">
+          <button type="button" class="tab" role="tab" id="tab-apps" aria-controls="panel-apps" aria-selected="true">Заявки</button>
+          <button type="button" class="tab" role="tab" id="tab-services" aria-controls="panel-services" aria-selected="false" tabindex="-1">Услуги</button>
+        </nav>
+        <div class="topbar__right">
+          <button type="button" class="btn btn--ghost btn--small" id="statsBtn">Статистика пользователей</button>
+          <span class="who" id="whoami"></span>
+          <button type="button" class="btn btn--quiet btn--small" id="logoutBtn">Выйти</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <!-- ---------- Заявки ---------- -->
+      <section id="panel-apps" role="tabpanel" aria-labelledby="tab-apps">
+        <div class="page__head">
+          <div>
+            <h1>Заявки по приоритету</h1>
+            <p class="muted">Отсортированы по «температуре»: баллы 0–100 за бюджет, срок, размер компании, роль, объём и нишу.</p>
+          </div>
+          <button type="button" class="btn btn--ghost btn--small" id="reloadApps">Обновить</button>
+        </div>
+
+        <div class="summary" id="summary" aria-live="polite">
+          <div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div><div class="kpi skeleton"></div>
+        </div>
+
+        <div class="filters" role="group" aria-label="Фильтр по температуре">
+          <button type="button" class="filter is-on" data-temp="">Все</button>
+          <button type="button" class="filter" data-temp="hot">🔥 Горячие</button>
+          <button type="button" class="filter" data-temp="warm">🌤 Тёплые</button>
+          <button type="button" class="filter" data-temp="cold">❄️ Холодные</button>
+        </div>
+
+        <div class="table-wrap">
+          <table class="table table--apps" id="appTable">
+            <thead>
+              <tr>
+                <th>Лид</th><th class="num">Score</th><th>Клиент</th><th>Услуга</th><th class="num">Бюджет</th>
+                <th>Срок</th><th>Отдел</th><th>Перс. менеджер</th><th>Дата</th><th><span class="sr-only">Действия</span></th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="10" class="muted">Загрузка…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ---------- Услуги ---------- -->
+      <section id="panel-services" role="tabpanel" aria-labelledby="tab-services" hidden>
+        <div class="page__head">
+          <div>
+            <h1>Услуги</h1>
+            <p class="muted">То, что клиент видит в выпадающем списке на главной. Границы бюджета задают ползунок. Двойной щелчок по строке — редактирование.</p>
+          </div>
+        </div>
+
+        <div class="svc-layout">
+          <div class="table-wrap">
+            <table class="table table--svc" id="svcTable">
+              <thead>
+                <tr><th class="num">ID</th><th>Услуга</th><th>Подпись диапазона</th><th class="num">От, ₽</th><th class="num">До, ₽</th><th>Активна</th><th>Обновлена</th><th><span class="sr-only">Действия</span></th></tr>
+              </thead>
+              <tbody><tr><td colspan="8" class="muted">Загрузка…</td></tr></tbody>
+            </table>
+          </div>
+
+          <aside class="toolbar" aria-label="Панель инструментов">
+            <p class="toolbar__title">Инструменты</p>
+            <button type="button" class="tool" id="addRow"><span class="tool__icon" aria-hidden="true">+</span>Добавить строку</button>
+            <button type="button" class="tool" id="reloadServices"><span class="tool__icon" aria-hidden="true">↻</span>Обновить</button>
+            <p class="toolbar__count" id="svcCount"></p>
+            <p class="toolbar__hint">Enter — сохранить, Esc — отменить. Выключенная или удалённая услуга сразу пропадает из списка на главной.</p>
+            <p class="form-msg" id="svcMsg" role="status" aria-live="polite"></p>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ================= Подтверждение удаления (своё окно, не window.confirm) ================= -->
+  <dialog class="dialog dialog--confirm" id="confirmDialog" aria-labelledby="confirmTitle">
+    <form method="dialog" class="dialog__body">
+      <h2 id="confirmTitle">Удалить услугу?</h2>
+      <p id="confirmText" class="muted"></p>
+      <div class="dialog__actions">
+        <button value="cancel" class="btn btn--ghost btn--small" autofocus>Отмена</button>
+        <button value="ok" class="btn btn--danger-solid btn--small" id="confirmOk">Удалить</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ================= Статистика пользователей (на весь экран) ================= -->
+  <dialog class="dialog dialog--full" id="statsDialog" aria-labelledby="statsTitle">
+    <div class="full">
+      <header class="full__head">
+        <div>
+          <h2 id="statsTitle">Статистика пользователей</h2>
+          <p class="muted" id="statsMeta">Время на главной и движение курсора. Данные — таблица behavior_metrics.</p>
+        </div>
+        <div class="full__actions">
+          <button type="button" class="btn btn--ghost btn--small" id="statsReload">Обновить</button>
+          <button type="button" class="icon-btn" id="statsClose" aria-label="Закрыть">✕</button>
+        </div>
+      </header>
+      <div class="full__body">
+        <div class="periods" id="periods"></div>
+        <div class="stats-grid">
+          <figure class="heat">
+            <figcaption>
+              <strong>Heatmap курсора за 30 дней</strong>
+              <span class="muted">Сетка 40×40 поверх схемы страницы. Чем больше и теплее круг, тем дольше там был курсор.</span>
+            </figcaption>
+            <div class="heat__frame" id="heatFrame"><canvas id="heatCanvas" role="img" aria-label="Тепловая карта курсора на главной странице"></canvas></div>
+            <div class="legend" aria-hidden="true"><span>реже</span><i class="legend__bar"></i><span>чаще</span></div>
+          </figure>
+          <section class="topbtn">
+            <h3>Топ кликов за 30 дней</h3>
+            <ol class="bars" id="topButtons"></ol>
+          </section>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ================= Просмотр заявки ================= -->
+  <dialog class="dialog dialog--wide" id="appDialog" aria-labelledby="appTitle">
+    <div class="detail">
+      <header class="detail__head">
+        <div>
+          <p class="muted" id="appNo"></p>
+          <h2 id="appTitle">Заявка</h2>
+        </div>
+        <button type="button" class="icon-btn" id="appClose" aria-label="Закрыть">✕</button>
+      </header>
+      <div class="detail__body" id="appBody"></div>
+    </div>
+  </dialog>
 </body>
 </html>

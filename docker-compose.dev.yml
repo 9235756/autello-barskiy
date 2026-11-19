@@ -1,0 +1,33 @@
+# =====================================================================
+#  РЕЖИМ РАЗРАБОТКИ (make dev) — накладывается поверх docker-compose.yml:
+#    COMPOSE_PROFILES=admin-tools \
+#      docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+#  Отличия от защищённого режима:
+#    - backend проброшен на 127.0.0.1:${BACKEND_DEV_PORT} → Swagger http://localhost:8000/docs
+#      (только loopback: с других машин порт не виден);
+#    - Swagger включён (DOCS_ENABLED=true) — и на :8000/docs, и через nginx /docs;
+#    - nginx: порт 80 отдаёт сайт без редиректа, 443 — https; заглушек 403 нет;
+#    - pgAdmin, registry, registry-ui запускаются (профиль admin-tools).
+# =====================================================================
+
+services:
+  backend:
+    environment:
+      DOCS_ENABLED: "${DOCS_ENABLED:-true}"
+    ports:
+      - "127.0.0.1:${BACKEND_DEV_PORT:-8000}:${BACKEND_INTERNAL_PORT:-8000}"
+    # Docker не публикует порты контейнера, который сидит ТОЛЬКО в internal-сети,
+    # поэтому в dev backend дополнительно подключён к public
+    networks:
+      - internal
+      - public
+
+  nginx:
+    environment:
+      NGINX_MODE: dev
+      DOCS_ENABLED: "${DOCS_ENABLED:-true}"
+    # !override — заменить список портов целиком (без заглушек 8000/5432)
+    ports: !override
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"

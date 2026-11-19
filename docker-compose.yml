@@ -1,17 +1,26 @@
 # =====================================================================
-#  Autello — инфраструктура MVP «докеризированный монолит» (Кейс 3, ч.1 + ч.2)
-#  Запуск:  docker compose up -d   (именно плагин `docker compose`, не docker-compose)
+#  Autello — «докеризированный монолит» (Кейс 3, части 1–3)
+#
+#  ЭТОТ ФАЙЛ = ЗАЩИЩЁННЫЙ РЕЖИМ (make secure или просто `docker compose up --build -d`):
+#    наружу публикует порты ТОЛЬКО nginx:
+#      80   → 301 на https
+#      443  → сайт (TLS 1.2+, HTTP/2, HSTS)
+#      8000 → 403 (имитация закрытого порта backend, сам backend не опубликован)
+#      5432 → 403 (имитация закрытого порта PostgreSQL, сама БД не опубликована)
+#    pgadmin, registry, registry-ui — в профиле admin-tools и НЕ запускаются.
+#    Swagger (/docs, /openapi.json) выключен: DOCS_ENABLED=false → 404.
+#
+#  РЕЖИМ РАЗРАБОТКИ (make dev) = этот файл + docker-compose.dev.yml + профиль admin-tools:
+#    COMPOSE_PROFILES=admin-tools docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 #
 #  Сети:
 #    public   — то, что смотрит наружу: nginx, registry, registry-ui, pgadmin
 #    internal — изолированная (internal: true, без выхода в интернет):
 #               postgres, backend, а также pgadmin и nginx (они в обеих сетях)
-#  Наружу публикуются только: nginx (HTTP_PORT), registry (REGISTRY_PORT, с логином),
-#  registry-ui (REGISTRY_UI_PORT), pgadmin (PGADMIN_PORT). PostgreSQL и backend — НЕТ.
 #
-#  Профиль tools (не стартует при обычном up):
+#  Профиль tools (разовые контейнеры):
 #    docker compose --profile tools run --rm frontend-build   — сборка фронта без Node.js на хосте
-#    docker compose --profile tools run --rm e2e              — браузерный тест формы (Playwright)
+#    docker compose --profile tools run --rm e2e              — Playwright: e2e-тесты и скриншоты
 # =====================================================================
 
 services:
@@ -41,6 +50,8 @@ services:
   #     ходит в postgres через internal ---
   pgadmin:
     image: dpage/pgadmin4:latest
+    # Только в dev-режиме (COMPOSE_PROFILES=admin-tools). В secure не запускается
+    profiles: ["admin-tools"]
     restart: unless-stopped
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
@@ -63,6 +74,8 @@ services:
   # --- Локальный Docker Registry с htpasswd-аутентификацией ---
   registry:
     image: registry:2
+    # Только в dev-режиме (COMPOSE_PROFILES=admin-tools). В secure не запускается
+    profiles: ["admin-tools"]
     restart: unless-stopped
     environment:
       REGISTRY_AUTH: htpasswd
@@ -82,6 +95,8 @@ services:
   # --- Веб-интерфейс реестра: «реестр доступен в браузере» ---
   registry-ui:
     image: joxit/docker-registry-ui:latest
+    # Только в dev-режиме (COMPOSE_PROFILES=admin-tools). В secure не запускается
+    profiles: ["admin-tools"]
     restart: unless-stopped
     environment:
       SINGLE_REGISTRY: "true"
@@ -97,24 +112,35 @@ services:
     networks:
       - public
 
-  # --- Nginx: статика frontend/dist + прокси /api/ (и /docs при DOCS_ENABLED=true) на backend ---
+  # --- Nginx: единственный сервис с опубликованными портами в secure-режиме ---
   nginx:
     image: nginx:alpine
     container_name: nginx
     restart: unless-stopped
     environment:
-      # Выбор шаблона docs_true/docs_false в nginx/templates/docs
-      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      # secure: 80 → 301, заглушки 403 на 8000/5432. В dev (docker-compose.dev.yml) — dev
+      NGINX_MODE: secure
+      # Swagger закрыт: /docs и /openapi.json → 404
+      DOCS_ENABLED: "false"
       BACKEND_INTERNAL_PORT: ${BACKEND_INTERNAL_PORT:-8000}
       # envsubst подставляет ТОЛЬКО эти переменные — $host, $uri и т.п. остаются nginx-переменными
-      NGINX_ENVSUBST_FILTER: "^(DOCS_ENABLED|BACKEND_INTERNAL_PORT)$$"
+      NGINX_ENVSUBST_FILTER: "^(DOCS_ENABLED|BACKEND_INTERNAL_PORT|NGINX_MODE)$$"
     ports:
-      - "${HTTP_PORT}:80"
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      # Имитация закрытых портов: nginx отвечает 403 (см. nginx/templates/modes/secure.conf.template)
+      - "${STUB_BACKEND_PORT:-8000}:8000"
+      - "${STUB_POSTGRES_PORT:-5432}:5432"
     volumes:
       # Шаблоны → /etc/nginx/conf.d/ (через envsubst при старте). conf.d НЕ монтируем: туда пишет entrypoint
       - ./nginx/templates:/etc/nginx/templates:ro
       # Результат `npm run build`
       - ./frontend/dist:/usr/share/nginx/html:ro
+      # TLS: самоподписанный (make certs) или Let's Encrypt (scripts/letsencrypt.sh)
+      - ${SSL_CERT_PATH:-./nginx/certs/fullchain.pem}:/etc/nginx/certs/fullchain.pem:ro
+      - ${SSL_KEY_PATH:-./nginx/certs/privkey.pem}:/etc/nginx/certs/privkey.pem:ro
+      # Webroot для проверки Let's Encrypt (/.well-known/acme-challenge/)
+      - ./nginx/certbot-www:/var/www/certbot:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -159,6 +185,11 @@ services:
     environment:
       # Имя сервиса БД во внутренней сети
       POSTGRES_HOST: postgres
+      # secure-режим: Swagger выключен (в dev переопределяется на true)
+      DOCS_ENABLED: "false"
+    volumes:
+      # SQL-миграции части 3 применяются при старте (app/core/migrations.py)
+      - ./sql:/srv/sql:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -181,23 +212,31 @@ services:
       - /app/node_modules
     command: sh -c "npm ci --no-audit --no-fund && npm run build"
 
-  # Браузерный тест формы + скриншоты для сдачи → reports/screens/
+  # Playwright: e2e-тесты части 3 + скриншоты для сдачи → reports/screens/
+  # Запускается в dev-режиме (make e2e): нужны Swagger и порт 80 без редиректа
   e2e:
     image: mcr.microsoft.com/playwright:v1.49.1-noble
     profiles: ["tools"]
     working_dir: /e2e
     environment:
       BASE_URL: http://nginx
+      BACKEND_URL: http://backend:${BACKEND_INTERNAL_PORT:-8000}
       SCREENS_DIR: /reports/screens
-      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      REPORTS_DIR: /reports
+      DOCS_ENABLED: ${DOCS_ENABLED:-true}
+      DEMO_ADMIN_USER: ${DEMO_ADMIN_USER:-admin}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-change_me_demo}
+      VISIT_SECONDS: ${VISIT_SECONDS:-150}
+      E2E_ARGS: ${E2E_ARGS:-}
       CI: "1"
     volumes:
-      - ./scripts/e2e:/e2e
+      - ./e2e:/e2e
       - /e2e/node_modules
       - ./reports:/reports
     networks:
       - public
-    command: sh -c "npm ci --no-audit --no-fund --loglevel=error && npx playwright test"
+    # Аргументы playwright (например, имя spec-файла) — через make e2e E2E_ARGS=...
+    command: ["sh", "-c", "npm ci --no-audit --no-fund --loglevel=error && npx playwright test $$E2E_ARGS"]
 
 networks:
   public:

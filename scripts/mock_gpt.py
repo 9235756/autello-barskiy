@@ -14,7 +14,7 @@ import hashlib
 import json
 import random
 
-from _common import load_env, request
+from _common import admin_token, load_env, request
 
 DEMO = {
     "id": 0, "last_name": "Барский", "first_name": "Андрей", "business_niche": "Автосалон", "role": "руководитель",
@@ -78,9 +78,10 @@ def main() -> None:
     if args.demo or (args.id is None and args.last is None):
         apps = [DEMO]
     elif args.id is not None:
-        apps = [request("GET", f"/api/applications/{args.id}")[1]]
+        # Часть 3: просмотр заявок — только с токеном админа
+        apps = [request("GET", f"/api/applications/{args.id}", token=admin_token(register_if_empty=False))[1]]
     else:
-        apps = request("GET", f"/api/applications?limit={args.last}")[1]
+        apps = request("GET", f"/api/applications?limit={args.last}", token=admin_token(register_if_empty=False))[1]
 
     for app in apps:
         print(json.dumps(score_lead(app), ensure_ascii=False, indent=2))
