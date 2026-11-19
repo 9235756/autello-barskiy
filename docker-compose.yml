@@ -1,13 +1,17 @@
 # =====================================================================
-#  Autello — инфраструктура MVP «докеризированный монолит» (Кейс 3, ч.1)
+#  Autello — инфраструктура MVP «докеризированный монолит» (Кейс 3, ч.1 + ч.2)
 #  Запуск:  docker compose up -d   (именно плагин `docker compose`, не docker-compose)
 #
 #  Сети:
 #    public   — то, что смотрит наружу: nginx, registry, registry-ui, pgadmin
 #    internal — изолированная (internal: true, без выхода в интернет):
-#               postgres, pgadmin, будущий backend
+#               postgres, backend, а также pgadmin и nginx (они в обеих сетях)
 #  Наружу публикуются только: nginx (HTTP_PORT), registry (REGISTRY_PORT, с логином),
-#  registry-ui (REGISTRY_UI_PORT), pgadmin (PGADMIN_PORT). PostgreSQL — НЕТ.
+#  registry-ui (REGISTRY_UI_PORT), pgadmin (PGADMIN_PORT). PostgreSQL и backend — НЕТ.
+#
+#  Профиль tools (не стартует при обычном up):
+#    docker compose --profile tools run --rm frontend-build   — сборка фронта без Node.js на хосте
+#    docker compose --profile tools run --rm e2e              — браузерный тест формы (Playwright)
 # =====================================================================
 
 services:
@@ -93,19 +97,36 @@ services:
     networks:
       - public
 
-  # --- Nginx: фронт + (в будущем) прокси на backend ---
+  # --- Nginx: статика frontend/dist + прокси /api/ (и /docs при DOCS_ENABLED=true) на backend ---
   nginx:
     image: nginx:alpine
+    container_name: nginx
     restart: unless-stopped
+    environment:
+      # Выбор шаблона docs_true/docs_false в nginx/templates/docs
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      BACKEND_INTERNAL_PORT: ${BACKEND_INTERNAL_PORT:-8000}
+      # envsubst подставляет ТОЛЬКО эти переменные — $host, $uri и т.п. остаются nginx-переменными
+      NGINX_ENVSUBST_FILTER: "^(DOCS_ENABLED|BACKEND_INTERNAL_PORT)$$"
     ports:
       - "${HTTP_PORT}:80"
     volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/html:/usr/share/nginx/html:ro
+      # Шаблоны → /etc/nginx/conf.d/ (через envsubst при старте). conf.d НЕ монтируем: туда пишет entrypoint
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # Результат `npm run build`
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
       - public
-      # Раскомментировать вместе с backend: nginx должен видеть backend во внутренней сети
-      # - internal
+      # Во внутренней сети nginx видит backend по имени backend:8000
+      - internal
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
@@ -128,19 +149,55 @@ services:
     networks:
       - public
 
-  # --- Backend: пока НЕ реализован. Заготовка на часть 2 ---
-  # backend:
-  #   image: ${REGISTRY_HOST}:${REGISTRY_PORT}/autello-backend:latest
-  #   restart: unless-stopped
-  #   environment:
-  #     DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks:
-  #     - internal          # только внутренняя сеть, без ports — доступ через nginx /api/
-  #   labels:
-  #     - "com.centurylinklabs.watchtower.enable=true"
+  # --- Backend: FastAPI. Только сеть internal, БЕЗ ports — снаружи доступен лишь через nginx /api/ ---
+  backend:
+    build: ./backend
+    image: ${REGISTRY_HOST}:${REGISTRY_PORT}/autello-backend:latest
+    container_name: backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Имя сервиса БД во внутренней сети
+      POSTGRES_HOST: postgres
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+    # Healthcheck описан в backend/Dockerfile: GET /api/health (внутри — SELECT 1 к БД)
+
+  # ===================== Профиль tools: разовые служебные контейнеры =====================
+
+  # Сборка фронтенда, если на машине нет Node.js («npm: command not found» из урока)
+  frontend-build:
+    image: node:20-alpine
+    profiles: ["tools"]
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      # node_modules контейнера (Linux) не смешиваем с node_modules хоста
+      - /app/node_modules
+    command: sh -c "npm ci --no-audit --no-fund && npm run build"
+
+  # Браузерный тест формы + скриншоты для сдачи → reports/screens/
+  e2e:
+    image: mcr.microsoft.com/playwright:v1.49.1-noble
+    profiles: ["tools"]
+    working_dir: /e2e
+    environment:
+      BASE_URL: http://nginx
+      SCREENS_DIR: /reports/screens
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
+      CI: "1"
+    volumes:
+      - ./scripts/e2e:/e2e
+      - /e2e/node_modules
+      - ./reports:/reports
+    networks:
+      - public
+    command: sh -c "npm ci --no-audit --no-fund --loglevel=error && npx playwright test"
 
 networks:
   public:

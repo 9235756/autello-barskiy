@@ -13,3 +13,8 @@ __pycache__/
 *.pyc
 .vscode/
 .idea/
+
+# Часть 2: зависимости и сборка фронта
+node_modules/
+# dist — результат npm run build. Уберите эту строку, если хотите показать сборку в репозитории
+frontend/dist/

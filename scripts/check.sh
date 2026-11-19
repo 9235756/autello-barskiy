@@ -1,116 +1,132 @@
 #!/usr/bin/env bash
-# Проверка стека + отчёт reports/check_report.md
+# Проверка стека (часть 2: backend + nginx + фронт) → reports/check_report.md
 #   bash scripts/check.sh      (или make check)
 set -uo pipefail
 source "$(dirname "$0")/_env.sh"
 
 REPORT="reports/check_report.md"
 mkdir -p reports
-REG="${REGISTRY_HOST}:${REGISTRY_PORT}"
-REG_URL="http://localhost:${REGISTRY_PORT}"
+BASE="http://localhost$([ "${HTTP_PORT:-80}" = 80 ] || echo ":$HTTP_PORT")"
+PORT_INT="${BACKEND_INTERNAL_PORT:-8000}"
 PASS=0; FAIL=0
 ROWS=()
 
 ok()   { PASS=$((PASS+1)); ROWS+=("| ✅ | $1 | $2 |"); printf '\033[32m✅ %s\033[0m — %s\n' "$1" "$2"; }
 bad()  { FAIL=$((FAIL+1)); ROWS+=("| ❌ | $1 | $2 |"); printf '\033[31m❌ %s\033[0m — %s\n' "$1" "$2"; }
 check(){ if [ "$1" = 0 ]; then ok "$2" "$3"; else bad "$2" "$3"; fi; }
-http_code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" || true; }
-
-# Ждём, пока сервис начнёт отвечать (pgAdmin стартует ~20–40 c)
-wait_http() {
-  local url="$1" expect="$2" code=""
-  for _ in $(seq 1 30); do
-    code=$(http_code "$url"); [ "$code" = "$expect" ] && break; sleep 2
-  done
-  echo "$code"
-}
+code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" || true; }
+md()   { tr '|\n' '/ ' <<<"$1" | cut -c1-160; }   # безопасно для ячейки markdown-таблицы
 
 echo "=== 1. Контейнеры ==="
-COMPOSE_PS="$(docker compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1)"
+COMPOSE_PS="$(docker compose ps --format 'table {{.Name}}\t{{.Service}}\t{{.Status}}\t{{.Ports}}' 2>&1)"
 DOCKER_PS="$(docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1)"
 echo "$COMPOSE_PS"
-EXPECTED="nginx pgadmin postgres registry registry-ui watchtower"
-RUNNING="$(docker compose ps --status running --services 2>/dev/null | sort | tr '\n' ' ')"
-MISSING=""
-for s in $EXPECTED; do grep -qw "$s" <<<"$RUNNING" || MISSING="$MISSING $s"; done
-check "$([ -z "$MISSING" ] && echo 0 || echo 1)" "Все 6 сервисов запущены" "${MISSING:+не запущены:$MISSING}${MISSING:-$RUNNING}"
+for svc in backend postgres nginx; do
+  CID="$(docker compose ps -q "$svc" 2>/dev/null)"
+  if [ -z "$CID" ]; then bad "$svc запущен" "контейнер не найден"; continue; fi
+  ST="$(docker inspect -f '{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}' "$CID")"
+  check "$([[ "$ST" == running/healthy || "$ST" == running ]] && echo 0 || echo 1)" "$svc: running/healthy" "$ST"
+done
 RESTARTING="$(docker inspect -f '{{if .State.Restarting}}{{.Name}} {{end}}' $(docker compose ps -aq) 2>/dev/null | tr -d '\n/' | xargs)"
-RESTART_COUNTS="$(docker inspect -f '{{.Name}}={{.RestartCount}}' $(docker compose ps -aq) 2>/dev/null | sed 's|^/||; s|^[a-z_]*-||; s|-[0-9]*=|=|' | tr '\n' ' ' | xargs)"
-check "$([ -z "$RESTARTING" ] && echo 0 || echo 1)" "Нет контейнеров в статусе Restarting" "${RESTARTING:-ни одного}; счётчики перезапусков: $RESTART_COUNTS"
-PG_HEALTH="$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q postgres)" 2>/dev/null)"
-check "$([ "$PG_HEALTH" = healthy ] && echo 0 || echo 1)" "postgres healthcheck" "${PG_HEALTH:-нет данных}"
+check "$([ -z "$RESTARTING" ] && echo 0 || echo 1)" "Ни один контейнер не в Restarting" "${RESTARTING:-ни одного}"
 
-echo "=== 2. Аутентификация Registry ==="
-C_NOAUTH=$(http_code "$REG_URL/v2/")
-C_AUTH=$(http_code -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "$REG_URL/v2/")
-C_BAD=$(http_code -u "$REGISTRY_USER:wrong_password" "$REG_URL/v2/")
-check "$([ "$C_AUTH" = 200 ] && echo 0 || echo 1)" "GET /v2/ с логином → 200" "получено $C_AUTH"
-check "$([ "$C_NOAUTH" = 401 ] && echo 0 || echo 1)" "GET /v2/ без логина → 401" "получено $C_NOAUTH"
-check "$([ "$C_BAD" = 401 ] && echo 0 || echo 1)" "GET /v2/ с неверным паролем → 401" "получено $C_BAD"
+echo "=== 2. backend видит БД ==="
+DB_PING="$(docker compose exec -T backend python -c "
+from sqlalchemy import text
+from app.core.db import engine
+with engine.connect() as c:
+    print('db=', c.execute(text('select current_database()')).scalar(), ' pg=', c.execute(text('show server_version')).scalar(), sep='')
+" 2>&1 | tail -n1)"
+check "$(grep -q '^db=' <<<"$DB_PING" && echo 0 || echo 1)" "backend → postgres (SQLAlchemy из контейнера)" "$(md "$DB_PING")"
+HEALTH="$(curl -s --max-time 10 "$BASE/api/health")"
+check "$(grep -q '"status":"ok"' <<<"$HEALTH" && grep -q '"db":"ok"' <<<"$HEALTH" && echo 0 || echo 1)" "GET /api/health через nginx" "\`$HEALTH\`"
 
-echo "=== 3. docker login / push в локальный реестр ==="
-if echo "$REGISTRY_PASSWORD" | docker login "$REG" -u "$REGISTRY_USER" --password-stdin >/dev/null 2>&1; then
-  ok "docker login $REG" "успешно"
+echo "=== 3. Услуги ==="
+SERVICES="$(curl -s --max-time 10 "$BASE/api/admin-settings")"
+N_SVC="$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' <<<"$SERVICES" 2>/dev/null || echo 0)"
+SVC_NAMES="$(python3 -c 'import json,sys; print(", ".join(f"{s["services"]} ({s["budget_range"]})" for s in json.load(sys.stdin)))' <<<"$SERVICES" 2>/dev/null)"
+check "$([ "$N_SVC" -ge 3 ] 2>/dev/null && echo 0 || echo 1)" "GET /api/admin-settings → ≥3 услуги" "$N_SVC шт.: $(md "$SVC_NAMES")"
+C_SLASH=$(code "$BASE/api/admin-settings/")
+check "$([ "$C_SLASH" = 200 ] && echo 0 || echo 1)" "GET /api/admin-settings/ (со слэшем) без 307" "HTTP $C_SLASH"
+
+echo "=== 4. Статика: index.html, CSS, JS ==="
+INDEX="$(curl -s --max-time 10 "$BASE/")"
+C_INDEX=$(code "$BASE/")
+# Минифицированный HTML может быть без кавычек: href=/assets/main.css — кавычки необязательны
+asset() { grep -oE "$1=\"?/assets/[^\" >]+\.$2" | head -n1 | sed -E "s/^$1=\"?//"; }
+CSS_PATH="$(asset href css <<<"$INDEX")"
+JS_PATH="$(asset src js <<<"$INDEX")"
+check "$([ "$C_INDEX" = 200 ] && echo 0 || echo 1)" "GET / (index.html)" "HTTP $C_INDEX"
+CSS_HDR="$(curl -s -o /dev/null -D - --max-time 10 "$BASE$CSS_PATH")"
+CSS_CODE="$(head -n1 <<<"$CSS_HDR" | awk '{print $2}')"
+CSS_TYPE="$(grep -i '^content-type:' <<<"$CSS_HDR" | cut -d' ' -f2- | tr -d '\r')"
+check "$([ -n "$CSS_PATH" ] && [ "$CSS_CODE" = 200 ] && grep -qi 'text/css' <<<"$CSS_TYPE" && echo 0 || echo 1)" "CSS ${CSS_PATH:-не найден в index.html}" "HTTP ${CSS_CODE:-—}, Content-Type: ${CSS_TYPE:-—}"
+JS_CODE=$(code "$BASE$JS_PATH")
+check "$([ -n "$JS_PATH" ] && [ "$JS_CODE" = 200 ] && echo 0 || echo 1)" "JS ${JS_PATH:-не найден в index.html}" "HTTP $JS_CODE"
+ADMIN_HTML="$(curl -s --max-time 10 "$BASE/admin/")"
+ADMIN_CSS="$(asset href css <<<"$ADMIN_HTML")"
+C_ADMIN_CSS=$(code "$BASE$ADMIN_CSS")
+check "$([ -n "$ADMIN_CSS" ] && [ "$C_ADMIN_CSS" = 200 ] && echo 0 || echo 1)" "/admin подключает CSS по абсолютному пути" "${ADMIN_CSS:-нет} → HTTP $C_ADMIN_CSS"
+C_MISSING=$(code "$BASE/assets/nope.css")
+check "$([ "$C_MISSING" = 404 ] && echo 0 || echo 1)" "Несуществующий CSS → 404, а не index.html" "HTTP $C_MISSING"
+
+echo "=== 5. POST без 307/405 ==="
+SVC_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])' <<<"$SERVICES" 2>/dev/null || echo 1)"
+payload() {
+  printf '{"application":{"last_name":"Проверкин","first_name":"%s","phone":"+7 900 000-00-00","service_id":%s,"role":"сотрудник","budget":"50000","comment":"check.sh"},"metrics":{"time_on_page_sec":5,"utm":{"utm_source":"check"}}}' "$1" "$SVC_ID"
+}
+for path in /api/applications /api/applications/; do
+  RES="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' --data "$(payload "Слэш${path: -1}")" "$BASE$path")"
+  check "$([ "$RES" = 201 ] && echo 0 || echo 1)" "POST $path" "HTTP $RES (ожидается 201, не 307/405)"
+done
+
+echo "=== 6. Изоляция backend ==="
+BACKEND_PORTS="$(docker port backend 2>/dev/null)"
+check "$([ -z "$BACKEND_PORTS" ] && echo 0 || echo 1)" "Контейнер backend не публикует порты" "${BACKEND_PORTS:-docker port backend: пусто}"
+BACKEND_NETS="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' backend 2>/dev/null)"
+check "$(grep -q '_public' <<<"$BACKEND_NETS" && echo 1 || echo 0)" "backend только в сети internal" "сети: $BACKEND_NETS"
+OWNER_8000="$(docker ps --format '{{.Names}} {{.Ports}}' | grep -E "(0\.0\.0\.0|::|127\.0\.0\.1):${PORT_INT}->" | awk '{print $1}' | xargs)"
+if [ -n "$OWNER_8000" ] && ! grep -qw backend <<<"$OWNER_8000"; then
+  NOTE="localhost:${PORT_INT} занят сторонним контейнером ($OWNER_8000) — к стеку не относится; backend стека порт не публикует"
+elif (exec 3<>/dev/tcp/127.0.0.1/"$PORT_INT") 2>/dev/null; then
+  NOTE="на localhost:${PORT_INT} слушает сторонний процесс (не Docker); backend стека порт не публикует"
 else
-  bad "docker login $REG" "ошибка входа"
+  NOTE="TCP-подключение к localhost:${PORT_INT} отклонено"
 fi
-# Docker Hub иногда рвёт соединение — даём pull до 3 попыток
-pull_retry() { for i in 1 2 3; do docker pull -q "$1" && return 0; echo "pull $1: попытка $i не удалась" >&2; sleep 3; done; return 1; }
-PUSH_LOG="$( { pull_retry hello-world && docker tag hello-world "$REG/hello-world:test" && docker push "$REG/hello-world:test"; } 2>&1 )"
-PUSH_RC=$?
-PUSH_LOG="$(sed $'s/\x1b\\[[0-9;]*m//g' <<<"$PUSH_LOG")"
-PUSH_INFO="$(grep -o 'digest: sha256:[0-9a-f]\{12\}' <<<"$PUSH_LOG" | tail -n1)"
-check $PUSH_RC "pull → tag → push $REG/hello-world:test" "${PUSH_INFO:-$(tail -n1 <<<"$PUSH_LOG" | tr '|' '/' | cut -c1-90)}"
-CATALOG="$(curl -s --max-time 10 -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "$REG_URL/v2/_catalog")"
-check "$(grep -q '"hello-world"' <<<"$CATALOG" && echo 0 || echo 1)" "/v2/_catalog содержит hello-world" "\`$CATALOG\`"
-TAGS="$(curl -s --max-time 10 -u "$REGISTRY_USER:$REGISTRY_PASSWORD" "$REG_URL/v2/hello-world/tags/list")"
-check "$(grep -q '"test"' <<<"$TAGS" && echo 0 || echo 1)" "Тег hello-world:test в реестре" "\`$TAGS\`"
+check "$([ -z "$BACKEND_PORTS" ] && echo 0 || echo 1)" "Backend стека недоступен с хоста напрямую" "$NOTE"
+NET_TEST="$(docker run --rm --network "${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}_public" alpine:3 sh -c "nc -z -w 3 backend $PORT_INT && echo OPEN || echo CLOSED" 2>/dev/null)"
+check "$([ "$NET_TEST" = CLOSED ] && echo 0 || echo 1)" "Из сети public backend недоступен" "nc backend:$PORT_INT → ${NET_TEST:-нет ответа}"
 
-echo "=== 4. Веб-интерфейсы ==="
-C=$(wait_http "http://localhost:${HTTP_PORT}/" 200);            check "$([ "$C" = 200 ] && echo 0 || echo 1)" "Nginx http://localhost:${HTTP_PORT}/" "HTTP $C"
-grep -q 'leadForm' <<<"$(curl -s "http://localhost:${HTTP_PORT}/")"; check $? "Nginx отдаёт форму заявки" "index.html с формой leadForm"
-C=$(wait_http "http://localhost:${REGISTRY_UI_PORT}/" 200);     check "$([ "$C" = 200 ] && echo 0 || echo 1)" "Registry UI http://localhost:${REGISTRY_UI_PORT}/" "HTTP $C"
-C=$(wait_http "http://localhost:${PGADMIN_PORT}/login" 200);    check "$([ "$C" = 200 ] && echo 0 || echo 1)" "pgAdmin http://localhost:${PGADMIN_PORT}/login" "HTTP $C"
-C=$(http_code "http://localhost:${HTTP_PORT}/api/leads")
-check "$([ "$C" != 502 ] && echo 0 || echo 1)" "/api/ не проксируется (backend ещё нет)" "HTTP $C — отдаётся SPA-фолбэк, не 502"
-
-echo "=== 5. Изоляция PostgreSQL ==="
-PG_ID="$(docker compose ps -q postgres)"
-PG_PORTS="$(docker port "$PG_ID" 2>/dev/null)"
-check "$([ -z "$PG_PORTS" ] && echo 0 || echo 1)" "Контейнер postgres не публикует порты" "${PG_PORTS:-docker port: пусто}"
-PG_NETS="$(docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$PG_ID")"
-check "$(grep -q '_public' <<<"$PG_NETS" && echo 1 || echo 0)" "postgres только во внутренней сети" "сети: $PG_NETS"
-INT_NET="${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}_internal"
-INTERNAL_FLAG="$(docker network inspect -f '{{.Internal}}' "$INT_NET" 2>/dev/null)"
-check "$([ "$INTERNAL_FLAG" = true ] && echo 0 || echo 1)" "Сеть $INT_NET помечена internal: true" "Internal=$INTERNAL_FLAG"
-DOCKER_5432="$(docker ps --format '{{.Names}} {{.Ports}}' | grep -E '(0\.0\.0\.0|::|127\.0\.0\.1):5432->' || true)"
-check "$([ -z "$DOCKER_5432" ] && echo 0 || echo 1)" "Порт 5432 не проброшен ни одним контейнером" "${DOCKER_5432:-проброса нет}"
-if (exec 3<>/dev/tcp/127.0.0.1/5432) 2>/dev/null; then
-  OWNER="$(lsof -nP -iTCP:5432 -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $1" pid "$2}')"
-  HOST_NOTE="на хосте 5432 слушает сторонний процесс (${OWNER:-неизвестно}), не Docker — к стеку не относится"
+echo "=== 7. Swagger ==="
+C_DOCS=$(code "$BASE/docs"); C_OPENAPI=$(code "$BASE/openapi.json")
+if [ "${DOCS_ENABLED:-false}" = true ]; then
+  check "$([ "$C_DOCS" = 200 ] && [ "$C_OPENAPI" = 200 ] && echo 0 || echo 1)" "DOCS_ENABLED=true: /docs и /openapi.json" "HTTP $C_DOCS / $C_OPENAPI"
 else
-  HOST_NOTE="TCP-подключение к localhost:5432 отклонено"
+  check "$([ "$C_DOCS" = 404 ] && [ "$C_OPENAPI" = 404 ] && echo 0 || echo 1)" "DOCS_ENABLED=false: /docs закрыт" "HTTP $C_DOCS / $C_OPENAPI (ожидается 404)"
 fi
-ok "Подключение к БД стека с хоста невозможно" "$HOST_NOTE"
-pull_retry alpine:3 >/dev/null 2>&1
-NET_TEST="$(docker run --rm --network "${COMPOSE_PROJECT_NAME:-$PROJECT_NAME}_public" alpine:3 sh -c 'nc -z -w 3 postgres 5432 && echo OPEN || echo CLOSED' 2>/dev/null)"
-check "$([ "$NET_TEST" = CLOSED ] && echo 0 || echo 1)" "Из сети public postgres недоступен" "nc postgres:5432 → $NET_TEST"
 
-echo "=== 6. Данные в БД ==="
+echo "=== 8. Данные в БД ==="
 PSQL=(docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB")
-COUNT="$("${PSQL[@]}" -tAc 'SELECT count(*) FROM leads' 2>&1 | tr -d '[:space:]')"
-check "$([[ "$COUNT" =~ ^[0-9]+$ ]] && [ "$COUNT" -gt 0 ] && echo 0 || echo 1)" "SELECT count(*) FROM leads" "$COUNT заявок"
-LAST3="$("${PSQL[@]}" -c "SELECT id, to_char(created_at AT TIME ZONE 'Europe/Moscow','DD.MM HH24:MI') AS created, name, phone, company, budget, contact_method, metrics->>'utm_source' AS utm FROM leads ORDER BY created_at DESC LIMIT 3" 2>&1)"
+N_APP="$("${PSQL[@]}" -tAc 'SELECT count(*) FROM applications' 2>&1 | tr -d '[:space:]')"
+N_MET="$("${PSQL[@]}" -tAc 'SELECT count(*) FROM behavior_metrics' 2>&1 | tr -d '[:space:]')"
+check "$([[ "$N_APP" =~ ^[0-9]+$ ]] && [ "$N_APP" -gt 0 ] && echo 0 || echo 1)" "SELECT count(*) FROM applications" "$N_APP"
+check "$([ "$N_APP" = "$N_MET" ] && echo 0 || echo 1)" "applications = behavior_metrics (связь 1:1)" "$N_APP = $N_MET"
+LAST3="$("${PSQL[@]}" -c "SELECT a.id, to_char(a.created_at AT TIME ZONE 'Europe/Moscow','DD.MM HH24:MI') AS created, a.last_name||' '||a.first_name AS fio, s.services AS service, a.budget, a.role, m.time_on_page_sec AS sec, jsonb_array_length(m.clicks) AS clicks, m.utm->>'utm_source' AS utm FROM applications a LEFT JOIN admin_settings s ON s.id=a.service_id LEFT JOIN behavior_metrics m ON m.application_id=a.id ORDER BY a.id DESC LIMIT 3" 2>&1)"
 echo "$LAST3"
+
+echo "=== 9. Логи backend ==="
+LOGS="$(docker logs --tail 20 backend 2>&1)"
+check "$(grep -q 'Traceback' <<<"$LOGS" && echo 1 || echo 0)" "Последние 20 строк docker logs backend без Traceback" "$(grep -c . <<<"$LOGS") строк проверено"
 
 # ---------- Отчёт ----------
 TOTAL=$((PASS+FAIL))
 if [ "$FAIL" -eq 0 ]; then SUMMARY="✅ Все проверки пройдены: $PASS из $TOTAL"; else SUMMARY="❌ Провалено проверок: $FAIL из $TOTAL"; fi
 {
-  echo "# Отчёт проверки стека Autello"
+  echo "# Отчёт проверки стека Autello — часть 2"
   echo
   echo "- Дата: $(date '+%Y-%m-%d %H:%M:%S %Z')"
   echo "- Режим: $( is_mock && echo 'эмуляция (MOCK_MODE=true), локальный Docker' || echo "боевой, VPS $VPS_HOST")"
+  echo "- DOCS_ENABLED: ${DOCS_ENABLED:-false}"
   echo "- Docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null), $(docker compose version --short 2>/dev/null | sed 's/^/compose /')"
   echo
   echo "## Итог"
@@ -129,15 +145,20 @@ if [ "$FAIL" -eq 0 ]; then SUMMARY="✅ Все проверки пройдены
   echo "## docker ps"
   echo; echo '```'; echo "$DOCKER_PS"; echo '```'
   echo
-  echo "## Последние 3 заявки (всего: $COUNT)"
+  echo "## Последние 3 заявки (всего: $N_APP, метрик: $N_MET)"
   echo; echo '```'; echo "$LAST3"; echo '```'
+  echo
+  echo "## docker logs --tail 20 backend"
+  echo; echo '```'; echo "$LOGS"; echo '```'
   echo
   echo "## Адреса"
   echo
-  echo "- Сайт: http://localhost:${HTTP_PORT}"
-  echo "- Registry UI: http://localhost:${REGISTRY_UI_PORT} (логин: \`$REGISTRY_USER\`)"
-  echo "- Registry API: http://localhost:${REGISTRY_PORT}/v2/_catalog"
+  echo "- Сайт: $BASE/"
+  echo "- Админка: $BASE/admin"
+  echo "- Swagger: $BASE/docs $([ "${DOCS_ENABLED:-false}" = true ] && echo '(открыт временно)' || echo '(закрыт)')"
   echo "- pgAdmin: http://localhost:${PGADMIN_PORT} (логин: \`$PGADMIN_DEFAULT_EMAIL\`)"
+  echo "- Registry UI: http://localhost:${REGISTRY_UI_PORT}"
+  echo "- Скриншоты e2e: reports/screens/"
 } > "$REPORT"
 
 echo

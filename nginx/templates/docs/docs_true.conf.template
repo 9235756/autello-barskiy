@@ -1,0 +1,17 @@
+# DOCS_ENABLED=true — Swagger открыт ВРЕМЕННО, для ручного тестирования API.
+# В продакшене выставьте DOCS_ENABLED=false и перезапустите nginx.
+location = /docs {
+    set $backend_upstream http://backend:${BACKEND_INTERNAL_PORT};
+    proxy_pass $backend_upstream;
+    include /etc/nginx/conf.d/snippets/proxy_params.conf;
+}
+location /docs/ {
+    set $backend_upstream http://backend:${BACKEND_INTERNAL_PORT};
+    proxy_pass $backend_upstream;
+    include /etc/nginx/conf.d/snippets/proxy_params.conf;
+}
+location = /openapi.json {
+    set $backend_upstream http://backend:${BACKEND_INTERNAL_PORT};
+    proxy_pass $backend_upstream;
+    include /etc/nginx/conf.d/snippets/proxy_params.conf;
+}

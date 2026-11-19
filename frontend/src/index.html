@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Autello Barskiy — детейлинг премиум-класса</title>
+  <meta name="description" content="Полировка, химчистка и керамическое покрытие для автомобилей премиум-класса. Оставьте заявку — подберём программу ухода под ваш бюджет.">
+  <meta name="theme-color" content="#ffffff">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@500;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Фон: золотые полупрозрачные круги (только декор) -->
+  <div class="orbs" aria-hidden="true">
+    <span class="orb orb--1"></span><span class="orb orb--2"></span><span class="orb orb--3"></span>
+    <span class="orb orb--4"></span><span class="orb orb--5"></span><span class="orb orb--6"></span>
+  </div>
+
+  <header class="hero">
+    <div class="wrap">
+      <p class="brand"><span class="brand__mark" aria-hidden="true"></span>Autello Barskiy</p>
+      <h1 class="hero__title">Уход за автомобилем, к&nbsp;которому не&nbsp;придраться</h1>
+      <p class="hero__lead">Студия премиального детейлинга: восстанавливаем глубину цвета лака, возвращаем салону запах новой машины и&nbsp;защищаем кузов керамикой на&nbsp;годы. Работаем с&nbsp;частными владельцами, автосалонами и&nbsp;корпоративными автопарками.</p>
+      <dl class="hero__facts">
+        <div><dt>12&nbsp;лет</dt><dd>в&nbsp;детейлинге премиум-сегмента</dd></div>
+        <div><dt>2&nbsp;часа</dt><dd>— персональный расчёт после заявки</dd></div>
+        <div><dt>до&nbsp;5&nbsp;лет</dt><dd>гарантии на&nbsp;керамическое покрытие</dd></div>
+      </dl>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="panel" id="panel" aria-labelledby="form-title">
+      <form id="leadForm" class="form" novalidate>
+        <div class="form__head">
+          <h2 id="form-title">Заявка на услугу</h2>
+          <p class="hint">Выберите услугу и&nbsp;бюджет — остальное поможет нам подготовить точное предложение. Поля со&nbsp;знаком <span class="req" aria-hidden="true">*</span> обязательны.</p>
+        </div>
+
+        <!-- 01. Услуга — главный элемент формы -->
+        <fieldset class="step step--service">
+          <legend><span class="step__no">01</span>Услуга</legend>
+
+          <div class="field field--service" data-field="service_id">
+            <label for="service">Какая услуга вас интересует <span class="req">*</span></label>
+            <div class="select select--lg" id="serviceWrap" data-state="loading">
+              <select id="service" name="service_id" required disabled data-track="service">
+                <option value="">Загружаем услуги…</option>
+              </select>
+            </div>
+            <p class="field__status" id="serviceStatus" role="status" aria-live="polite">Загружаем список услуг…</p>
+            <button type="button" class="link-btn" id="serviceRetry" hidden data-track="service_retry">Повторить загрузку</button>
+            <p class="field__error" id="err-service_id"></p>
+          </div>
+
+          <div class="field field--budget" data-field="budget">
+            <div class="budget__head">
+              <label for="budget">Бюджет</label>
+              <output id="budgetOut" for="budget" class="budget__value">—</output>
+            </div>
+            <input type="range" id="budget" name="budget" min="0" max="0" step="1000" value="0" disabled data-track="budget">
+            <div class="budget__scale"><span id="budgetMin">Выберите услугу</span><span id="budgetMax"></span></div>
+          </div>
+        </fieldset>
+
+        <!-- 02. Контакты -->
+        <fieldset class="step">
+          <legend><span class="step__no">02</span>О вас</legend>
+          <div class="grid grid--3">
+            <div class="field" data-field="last_name">
+              <label for="last_name">Фамилия <span class="req">*</span></label>
+              <input id="last_name" name="last_name" autocomplete="family-name" required maxlength="100" placeholder="Барский">
+              <p class="field__error" id="err-last_name"></p>
+            </div>
+            <div class="field" data-field="first_name">
+              <label for="first_name">Имя <span class="req">*</span></label>
+              <input id="first_name" name="first_name" autocomplete="given-name" required maxlength="100" placeholder="Андрей">
+              <p class="field__error" id="err-first_name"></p>
+            </div>
+            <div class="field" data-field="middle_name">
+              <label for="middle_name">Отчество</label>
+              <input id="middle_name" name="middle_name" autocomplete="additional-name" maxlength="100" placeholder="Викторович">
+            </div>
+          </div>
+          <div class="grid grid--2">
+            <div class="field" data-field="phone">
+              <label for="phone">Телефон <span class="req">*</span></label>
+              <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" required placeholder="+7 916 123-45-67">
+              <p class="field__error" id="err-phone"></p>
+            </div>
+            <div class="field" data-field="email">
+              <label for="email">Email</label>
+              <input id="email" name="email" type="email" autocomplete="email" maxlength="200" placeholder="you@company.ru">
+              <p class="field__error" id="err-email"></p>
+            </div>
+          </div>
+          <div class="field" data-field="role">
+            <span class="label" id="role-label">Ваша роль <span class="req">*</span></span>
+            <div class="chips" role="radiogroup" aria-labelledby="role-label">
+              <label class="chip"><input type="radio" name="role" value="руководитель" data-track="role_head"><span>Руководитель</span></label>
+              <label class="chip"><input type="radio" name="role" value="сотрудник" data-track="role_staff"><span>Сотрудник</span></label>
+            </div>
+            <p class="field__error" id="err-role"></p>
+          </div>
+        </fieldset>
+
+        <!-- 03. Задача -->
+        <fieldset class="step">
+          <legend><span class="step__no">03</span>О задаче</legend>
+          <div class="grid grid--2">
+            <div class="field">
+              <label for="business_niche">Сфера</label>
+              <div class="select"><select id="business_niche" name="business_niche">
+                <option value="">Выберите…</option>
+                <option>Частный владелец</option>
+                <option>Автосалон</option>
+                <option>Детейлинг-центр</option>
+                <option>Такси-парк</option>
+                <option>Каршеринг / прокат</option>
+                <option>Другое</option>
+              </select></div>
+            </div>
+            <div class="field">
+              <label for="company_size">Размер компании</label>
+              <div class="select"><select id="company_size" name="company_size">
+                <option value="">Выберите…</option>
+                <option>Только я</option>
+                <option>2–10 человек</option>
+                <option>11–50 человек</option>
+                <option>51–200 человек</option>
+                <option>Более 200 человек</option>
+              </select></div>
+            </div>
+            <div class="field">
+              <label for="task_type">Что нужно сделать</label>
+              <div class="select"><select id="task_type" name="task_type">
+                <option value="">Выберите…</option>
+                <option>Защита нового автомобиля</option>
+                <option>Восстановление внешнего вида</option>
+                <option>Предпродажная подготовка</option>
+                <option>Регулярный уход</option>
+              </select></div>
+            </div>
+            <div class="field">
+              <label for="need_volume">Сколько автомобилей</label>
+              <div class="select"><select id="need_volume" name="need_volume">
+                <option value="">Выберите…</option>
+                <option>1 автомобиль</option>
+                <option>2–5 автомобилей</option>
+                <option>6–20 автомобилей</option>
+                <option>Более 20 автомобилей</option>
+              </select></div>
+            </div>
+            <div class="field">
+              <label for="task_volume">Формат работы</label>
+              <div class="select"><select id="task_volume" name="task_volume">
+                <option value="">Выберите…</option>
+                <option>Разовая услуга</option>
+                <option>Несколько раз в год</option>
+                <option>Регулярное обслуживание автопарка</option>
+              </select></div>
+            </div>
+            <div class="field">
+              <label for="deadline">Когда нужно</label>
+              <div class="select"><select id="deadline" name="deadline">
+                <option value="">Выберите…</option>
+                <option>Как можно скорее</option>
+                <option>В течение недели</option>
+                <option>В течение месяца</option>
+                <option>Не срочно</option>
+              </select></div>
+            </div>
+          </div>
+          <div class="field">
+            <label for="product_interest">Что ещё интересно</label>
+            <div class="select"><select id="product_interest" name="product_interest">
+              <option value="">Выберите…</option>
+              <option>Только выбранная услуга</option>
+              <option>Комплекс услуг</option>
+              <option>Абонемент на уход</option>
+              <option>Корпоративный договор</option>
+            </select></div>
+          </div>
+        </fieldset>
+
+        <!-- 04. Связь -->
+        <fieldset class="step">
+          <legend><span class="step__no">04</span>Как связаться</legend>
+          <div class="field" data-field="contact_method">
+            <span class="label" id="cm-label">Удобный способ связи</span>
+            <div class="chips" role="radiogroup" aria-labelledby="cm-label">
+              <label class="chip"><input type="radio" name="contact_method" value="phone" checked data-track="cm_phone"><span>Звонок</span></label>
+              <label class="chip"><input type="radio" name="contact_method" value="telegram" data-track="cm_telegram"><span>Telegram</span></label>
+              <label class="chip"><input type="radio" name="contact_method" value="whatsapp" data-track="cm_whatsapp"><span>WhatsApp</span></label>
+              <label class="chip"><input type="radio" name="contact_method" value="email" data-track="cm_email"><span>Email</span></label>
+            </div>
+          </div>
+          <div class="field">
+            <label for="contact_time">Удобное время</label>
+            <div class="select"><select id="contact_time" name="contact_time">
+              <option value="">Любое</option>
+              <option>Утро, 9:00–12:00</option>
+              <option>День, 12:00–17:00</option>
+              <option>Вечер, 17:00–21:00</option>
+            </select></div>
+          </div>
+          <div class="field">
+            <label for="comment">Комментарий</label>
+            <textarea id="comment" name="comment" maxlength="2000" rows="3" placeholder="Марка и модель, состояние кузова, пожелания по срокам"></textarea>
+          </div>
+        </fieldset>
+
+        <div class="form__foot">
+          <p class="form__error" id="formError" role="alert"></p>
+          <button type="submit" class="btn" id="submitBtn" data-track="submit">
+            <span class="btn__label">Отправить</span>
+          </button>
+          <p class="legal">Нажимая «Отправить», вы&nbsp;соглашаетесь на&nbsp;обработку персональных данных.</p>
+        </div>
+      </form>
+
+      <div class="success" id="success" hidden tabindex="-1">
+        <svg class="success__icon" viewBox="0 0 52 52" aria-hidden="true">
+          <circle cx="26" cy="26" r="24" />
+          <path d="M15 27l7 7 15-16" />
+        </svg>
+        <h2 class="success__title">Заявка отправлена!</h2>
+        <p class="success__text">Мы свяжемся с&nbsp;вами в&nbsp;ближайшее время.</p>
+        <p class="success__meta" id="successMeta"></p>
+        <button type="button" class="link-btn" id="again" data-track="again">Отправить ещё одну заявку</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer wrap">
+    <p>© Autello Barskiy · детейлинг премиум-класса</p>
+  </footer>
+</body>
+</html>

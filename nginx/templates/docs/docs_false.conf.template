@@ -1,0 +1,4 @@
+# DOCS_ENABLED=false — Swagger закрыт. Явный 404, иначе location / вернул бы index.html с кодом 200.
+location = /docs         { return 404; }
+location /docs/          { return 404; }
+location = /openapi.json { return 404; }

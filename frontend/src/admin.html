@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Админка — Autello Barskiy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@500;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body class="admin">
+  <header class="admin__top">
+    <div class="wrap admin__bar">
+      <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"></span>Autello Barskiy</a>
+      <span class="badge">Авторизация будет добавлена позже · ADMIN_TOKEN уже заготовлен в .env</span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="block" aria-labelledby="svc-title">
+      <div class="block__head">
+        <div>
+          <h1 id="svc-title">Услуги</h1>
+          <p class="muted">То, что клиент видит в выпадающем списке на главной. Границы бюджета задают ползунок.</p>
+        </div>
+        <button type="button" class="btn btn--ghost" id="reloadServices">Обновить</button>
+      </div>
+
+      <form id="svcForm" class="svc-form" novalidate>
+        <div class="svc-form__name">
+          <label for="f_services">Название</label>
+          <input id="f_services" name="services" required minlength="2" maxlength="200" placeholder="Керамическое покрытие">
+        </div>
+        <div>
+          <label for="f_min">Бюджет от, ₽</label>
+          <input id="f_min" name="budget_min" type="number" min="0" step="1000" required placeholder="50000">
+        </div>
+        <div>
+          <label for="f_max">до, ₽</label>
+          <input id="f_max" name="budget_max" type="number" min="0" step="1000" required placeholder="250000">
+        </div>
+        <div>
+          <label for="f_range">Подпись</label>
+          <input id="f_range" name="budget_range" maxlength="50" placeholder="авто: 50к–250к">
+        </div>
+        <button type="submit" class="btn">Добавить</button>
+      </form>
+      <p class="msg" id="svcMsg" role="status" aria-live="polite"></p>
+
+      <div class="table-wrap">
+        <table class="table" id="svcTable">
+          <thead>
+            <tr><th>ID</th><th>Название</th><th>Подпись</th><th class="num">От, ₽</th><th class="num">До, ₽</th><th>Активна</th><th>Обновлена</th><th></th></tr>
+          </thead>
+          <tbody><tr><td colspan="8" class="muted">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block" aria-labelledby="app-title">
+      <div class="block__head">
+        <div>
+          <h2 id="app-title">Последние заявки</h2>
+          <p class="muted">20 последних заявок с сайта вместе с поведенческими метриками.</p>
+        </div>
+        <button type="button" class="btn btn--ghost" id="reloadApps">Обновить</button>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="appTable">
+          <thead>
+            <tr><th>№</th><th>Дата</th><th>ФИО</th><th>Телефон</th><th>Услуга</th><th class="num">Бюджет</th><th>Роль</th><th>Связь</th><th class="num">На странице</th><th class="num">Клики</th><th>UTM</th></tr>
+          </thead>
+          <tbody><tr><td colspan="11" class="muted">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
